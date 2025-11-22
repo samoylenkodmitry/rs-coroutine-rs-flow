@@ -1,0 +1,18 @@
+[workspace]
+members = [
+    "rs_coroutine_core",
+    "rs_flow",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["rs-coroutine contributors"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/samoylenkodmitry/rs-coroutine-rs-flow"
+
+[workspace.dependencies]
+tokio = { version = "1.35", features = ["full"] }
+futures = "0.3"
+pin-project = "1.1"

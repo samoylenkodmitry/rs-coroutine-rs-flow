@@ -1,0 +1,15 @@
+[package]
+name = "rs_coroutine_core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+futures = { workspace = true }
+pin-project = { workspace = true }
+
+[lib]
+proc-macro = false
