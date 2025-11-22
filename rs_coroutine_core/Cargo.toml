@@ -7,4 +7,4 @@ edition = "2021"
 futures = "0.3"
 once_cell = "1"
 rs_coroutine_macros = { path = "../rs_coroutine_macros" }
-tokio = { version = "1", features = ["sync", "macros", "rt", "rt-multi-thread"] }
+tokio = { version = "1", features = ["sync", "macros", "rt", "rt-multi-thread", "time"] }

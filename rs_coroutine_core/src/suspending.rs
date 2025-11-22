@@ -2,7 +2,6 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-#[derive(Clone)]
 pub struct Suspending<T> {
     action: Arc<dyn Fn() -> Pin<Box<dyn Future<Output = T> + Send>> + Send + Sync>,
 }
@@ -20,5 +19,13 @@ impl<T> Suspending<T> {
 
     pub async fn call(&self) -> T {
         (self.action)().await
+    }
+}
+
+impl<T> Clone for Suspending<T> {
+    fn clone(&self) -> Self {
+        Self {
+            action: self.action.clone(),
+        }
     }
 }

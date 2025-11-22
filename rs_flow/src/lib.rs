@@ -112,21 +112,32 @@ impl<T: Send + 'static> Flow<T> {
         Flow::from_fn(move |collector| {
             let upstream = self.clone();
             async move {
-                let mut remaining = limit;
-                if remaining == 0 {
+                if limit == 0 {
                     return;
                 }
-                upstream
-                    .collect(move |value: T| {
-                        let collector = collector.clone();
-                        async move {
-                            if remaining > 0 {
-                                remaining -= 1;
-                                collector.emit(value.clone()).await;
+
+                let (tx, mut rx) = mpsc::channel::<T>(limit);
+                let handle = tokio::spawn(async move {
+                    upstream
+                        .collect(move |value: T| {
+                            let tx = tx.clone();
+                            async move {
+                                let _ = tx.send(value).await;
                             }
-                        }
-                    })
-                    .await;
+                        })
+                        .await;
+                });
+
+                let mut count = 0usize;
+                while let Some(value) = rx.recv().await {
+                    collector.emit(value.clone()).await;
+                    count += 1;
+                    if count >= limit {
+                        break;
+                    }
+                }
+
+                handle.abort();
             }
         })
     }
@@ -141,12 +152,12 @@ impl<T: Send + 'static> Flow<T> {
                 let (tx, mut rx) = mpsc::channel(capacity);
                 tokio::spawn(async move {
                     upstream
-                        .collect(|value: T| {
-                            let tx = tx.clone();
-                            async move {
-                                let _ = tx.send(value).await;
-                            }
-                        })
+                    .collect(move |value: T| {
+                        let tx = tx.clone();
+                        async move {
+                            let _ = tx.send(value).await;
+                        }
+                    })
                         .await;
                 });
 
@@ -168,12 +179,12 @@ impl<T: Send + 'static> Flow<T> {
                 let (tx, mut rx) = mpsc::channel(8);
                 dispatcher.spawn(async move {
                     upstream
-                        .collect(|value: T| {
-                            let tx = tx.clone();
-                            async move {
-                                let _ = tx.send(value).await;
-                            }
-                        })
+                    .collect(move |value: T| {
+                        let tx = tx.clone();
+                        async move {
+                            let _ = tx.send(value).await;
+                        }
+                    })
                         .await;
                 });
 
@@ -208,7 +219,7 @@ impl<T: Send + 'static> Flow<T> {
                                 let flow = transform(value);
                                 let handle = tokio::spawn(async move {
                                     flow
-                                        .collect(|inner| {
+                                        .collect(move |inner| {
                                             let tx = tx.clone();
                                             async move {
                                                 let _ = tx.send(inner).await;
@@ -274,6 +285,7 @@ pub mod hot {
     use std::sync::Arc;
     use tokio::sync::{broadcast, watch};
 
+    #[derive(Clone)]
     pub struct SharedFlow<T> {
         sender: broadcast::Sender<T>,
     }
@@ -301,6 +313,7 @@ pub mod hot {
         }
     }
 
+    #[derive(Clone)]
     pub struct StateFlow<T> {
         sender: watch::Sender<T>,
     }
@@ -316,11 +329,16 @@ pub mod hot {
         }
 
         pub fn as_flow(&self) -> Flow<T> {
-            let mut rx = self.sender.subscribe();
-            Flow::from_fn(move |collector: Arc<FlowCollector<T>>| async move {
-                collector.emit(rx.borrow().clone()).await;
-                while rx.changed().await.is_ok() {
-                    collector.emit(rx.borrow().clone()).await;
+            let rx = self.sender.subscribe();
+            Flow::from_fn(move |collector: Arc<FlowCollector<T>>| {
+                let mut rx = rx.clone();
+                async move {
+                    let initial = rx.borrow().clone();
+                    collector.emit(initial).await;
+                    while rx.changed().await.is_ok() {
+                        let next = rx.borrow().clone();
+                        collector.emit(next).await;
+                    }
                 }
             })
         }

@@ -1,0 +1,9 @@
+[package]
+name = "example_app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rs_coroutine_core = { path = "../rs_coroutine_core" }
+rs_flow = { path = "../rs_flow" }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }

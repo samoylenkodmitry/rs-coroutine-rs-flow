@@ -3,6 +3,15 @@
 version = 4
 
 [[package]]
+name = "example_app"
+version = "0.1.0"
+dependencies = [
+ "rs_coroutine_core",
+ "rs_flow",
+ "tokio",
+]
+
+[[package]]
 name = "futures"
 version = "0.3.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"

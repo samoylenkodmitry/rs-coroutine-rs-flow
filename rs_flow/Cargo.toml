@@ -6,4 +6,4 @@ edition = "2021"
 [dependencies]
 futures = "0.3"
 rs_coroutine_core = { path = "../rs_coroutine_core" }
-tokio = { version = "1", features = ["sync", "macros", "rt", "rt-multi-thread"] }
+tokio = { version = "1", features = ["sync", "macros", "rt", "rt-multi-thread", "time"] }
