@@ -1,0 +1,12 @@
+[package]
+name = "web_fetch_example"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rs_coroutine_core = { path = "../../rs_coroutine_core" }
+rs_flow = { path = "../../rs_flow" }
+tokio = { workspace = true }
+futures = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }

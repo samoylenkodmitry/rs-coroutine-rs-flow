@@ -1,0 +1,10 @@
+[package]
+name = "rs_coroutine_core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { workspace = true }
+futures = { workspace = true }
+pin-project = { workspace = true }
+tokio-util = "0.7"

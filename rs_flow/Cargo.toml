@@ -1,0 +1,10 @@
+[package]
+name = "rs_flow"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rs_coroutine_core = { path = "../rs_coroutine_core" }
+tokio = { workspace = true }
+futures = { workspace = true }
+pin-project = { workspace = true }
