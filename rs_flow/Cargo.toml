@@ -1,0 +1,20 @@
+[package]
+name = "rs_flow"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rs_coroutine_core = { path = "../rs_coroutine_core" }
+tokio = { workspace = true }
+futures = { workspace = true }
+pin-project = { workspace = true }
+
+[lib]
+proc-macro = false
+
+[[example]]
+name = "basic_usage"
+path = "../examples/basic_usage.rs"
