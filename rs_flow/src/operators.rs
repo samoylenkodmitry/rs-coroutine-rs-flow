@@ -181,21 +181,48 @@ where
         Flow::new(move |collector| {
             let upstream = self.clone();
             async move {
-                let emitted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                if count == 0 {
+                    return;
+                }
 
-                upstream
-                    .collect(move |value| {
-                        let collector = collector.clone();
-                        let emitted = Arc::clone(&emitted);
-                        async move {
-                            // Atomically increment and check if we should emit
-                            let prev_emitted = emitted.fetch_add(1, Ordering::SeqCst);
-                            if prev_emitted < count {
-                                collector.emit(value).await;
+                let (tx, mut rx) = mpsc::channel::<T>(1);
+                let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let done_clone = Arc::clone(&done);
+
+                // Spawn upstream collection
+                let producer = tokio::spawn(async move {
+                    upstream
+                        .collect(move |value| {
+                            let tx = tx.clone();
+                            let done = Arc::clone(&done_clone);
+                            async move {
+                                if done.load(Ordering::SeqCst) {
+                                    // Yield to allow task cancellation
+                                    tokio::task::yield_now().await;
+                                    return;
+                                }
+                                // This will block if receiver is full, allowing abort to work
+                                let _ = tx.send(value).await;
                             }
-                        }
-                    })
-                    .await;
+                        })
+                        .await;
+                });
+
+                // Receive exactly `count` values then stop
+                let mut received = 0;
+                while received < count {
+                    if let Some(value) = rx.recv().await {
+                        collector.emit(value).await;
+                        received += 1;
+                    } else {
+                        break; // Upstream completed
+                    }
+                }
+
+                // Signal upstream to stop and abort
+                done.store(true, Ordering::SeqCst);
+                drop(rx);
+                producer.abort();
             }
         })
     }
