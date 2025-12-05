@@ -2,7 +2,6 @@
 ///
 /// This module provides ergonomic macros that eliminate boilerplate
 /// and provide a Kotlin-like developer experience.
-
 /// Creates a Flow with implicit collector access via emit!()
 ///
 /// # Example

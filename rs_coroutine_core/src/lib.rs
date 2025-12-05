@@ -1,3 +1,6 @@
+#![forbid(unsafe_code)]
+#![deny(warnings)]
+
 pub mod executor;
 pub mod job;
 pub mod scope;

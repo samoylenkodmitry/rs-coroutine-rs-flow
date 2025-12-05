@@ -19,6 +19,14 @@ enum UserUiState {
     Error(String),
 }
 
+fn describe_state(state: &UserUiState) -> String {
+    match state {
+        UserUiState::Loading => "Loading".to_string(),
+        UserUiState::Loaded(user) => format!("Loaded {} ({})", user.name, user.id),
+        UserUiState::Error(message) => format!("Error: {message}"),
+    }
+}
+
 /// Simulate fetching a user from an API
 async fn fetch_user_from_api() -> User {
     sleep(Duration::from_millis(500)).await;
@@ -61,7 +69,10 @@ async fn example_with_dispatcher() {
             })
             .await;
 
-        println!("Back on main dispatcher with user: {:?}", user);
+        println!(
+            "Back on main dispatcher with user: {} ({})",
+            user.name, user.id
+        );
     });
 
     job.join().await;
@@ -89,8 +100,7 @@ async fn example_parallel_work() {
             "Hello"
         });
 
-        let (result1, result2) =
-            futures::join!(task1.await_result(), task2.await_result());
+        let (result1, result2) = futures::join!(task1.await_result(), task2.await_result());
 
         println!("Results: {} and {}", result1, result2);
     });
@@ -196,8 +206,8 @@ async fn example_state_flow() {
     // Subscribe to state changes
     let flow = state.as_flow();
     let collector = tokio::spawn(async move {
-        flow.take(3)
-            .collect(|state| async move { println!("State: {:?}", state) })
+        flow.take(4)
+            .collect(|state| async move { println!("State: {}", describe_state(&state)) })
             .await;
     });
 
@@ -217,6 +227,8 @@ async fn example_state_flow() {
         id: 2,
         name: "Charlie".to_string(),
     }));
+
+    state.emit(UserUiState::Error("Simulated failure".to_string()));
 
     let _ = collector.await;
     println!();
@@ -241,10 +253,15 @@ async fn example_suspending() {
 
     // Collect multiple times (each collection re-executes the block)
     println!("First collection:");
-    user_flow.clone().collect(|u| async move { println!("  {:?}", u) }).await;
+    user_flow
+        .clone()
+        .collect(|u| async move { println!("  {:?}", u) })
+        .await;
 
     println!("Second collection:");
-    user_flow.collect(|u| async move { println!("  {:?}", u) }).await;
+    user_flow
+        .collect(|u| async move { println!("  {:?}", u) })
+        .await;
 
     println!();
 }

@@ -178,8 +178,6 @@ async fn example_flat_map() {
     print!("  Flat mapped: ");
     numbers
         .flat_map_sync(|x| {
-            // Need to copy x since it's captured by value
-            let x = x;
             let x2 = x * 10;
             flow_fn(move |collector| async move {
                 collector.emit(x).await;
@@ -323,7 +321,7 @@ async fn example_distinct_by_key() {
     users
         .distinct_until_changed_by(|u| u.id)
         .collect(|u| async move {
-            println!("    {:?}", u);
+            println!("    {}:{}", u.id, u.name);
         })
         .await;
 
