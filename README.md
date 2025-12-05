@@ -41,8 +41,8 @@ Add the dependencies to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-rs_coroutine_core = { path = "rs_coroutine_core" }
-rs_flow = { path = "rs_flow" }
+rs_coroutine_core = "0.1.0"
+rs_flow = "0.1.0"
 tokio = { version = "1.35", features = ["full"] }
 ```
 
@@ -237,6 +237,15 @@ The `Dispatcher` wraps an `Executor` trait, allowing you to plug in any async ru
 ## Specification
 
 See [rs-coroutine-rs-flow-spec.md](rs-coroutine-rs-flow-spec.md) for the complete specification.
+
+## Releases and crates.io publishing
+
+- A GitHub Actions workflow builds and tests every push and pull request.
+- Creating a tag that starts with `v` (for example `v0.1.0`) triggers a release build and publishes both crates to crates.io.
+- The workflow expects a repository secret named `CRATES_IO_TOKEN` containing a crates.io API token with publish rights for
+  `rs_coroutine_core` and `rs_flow`.
+
+Ensure the workspace version matches the tag before publishing.
 
 ## License
 
