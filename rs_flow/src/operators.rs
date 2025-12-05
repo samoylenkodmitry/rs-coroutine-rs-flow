@@ -10,18 +10,40 @@ pub trait FlowExt<T>: Sized
 where
     T: Send + 'static,
 {
-    /// Map each value in the flow
+    /// Map each value in the flow (async)
     fn map<U, F, Fut>(self, f: F) -> Flow<U>
     where
         U: Send + 'static,
         F: Fn(T) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = U> + Send + 'static;
 
-    /// Filter values in the flow
+    /// Map each value in the flow (sync - Kotlin-like)
+    ///
+    /// # Example
+    /// ```ignore
+    /// flow.map_sync(|x| x * 2)
+    /// ```
+    fn map_sync<U, F>(self, f: F) -> Flow<U>
+    where
+        U: Send + 'static,
+        F: Fn(T) -> U + Send + Sync + 'static;
+
+    /// Filter values in the flow (async)
     fn filter<F, Fut>(self, predicate: F) -> Flow<T>
     where
         F: Fn(&T) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = bool> + Send + 'static,
+        T: Clone;
+
+    /// Filter values in the flow (sync - Kotlin-like)
+    ///
+    /// # Example
+    /// ```ignore
+    /// flow.filter_sync(|x| x % 2 == 0)
+    /// ```
+    fn filter_sync<F>(self, predicate: F) -> Flow<T>
+    where
+        F: Fn(&T) -> bool + Send + Sync + 'static,
         T: Clone;
 
     /// Take only the first n values
@@ -33,12 +55,71 @@ where
     /// Switch to a different dispatcher for upstream collection
     fn flow_on(self, dispatcher: Dispatcher) -> Flow<T>;
 
-    /// Flat map to the latest flow, cancelling previous
+    /// Flat map to the latest flow, cancelling previous (async)
     fn flat_map_latest<U, F, Fut>(self, f: F) -> Flow<U>
     where
         U: Send + 'static,
         F: Fn(T) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Flow<U>> + Send + 'static;
+
+    /// Flat map to the latest flow, cancelling previous (sync)
+    fn flat_map_latest_sync<U, F>(self, f: F) -> Flow<U>
+    where
+        U: Send + 'static,
+        F: Fn(T) -> Flow<U> + Send + Sync + 'static;
+
+    /// Transform each value and flatten (async)
+    fn flat_map<U, F, Fut>(self, f: F) -> Flow<U>
+    where
+        U: Send + 'static,
+        F: Fn(T) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Flow<U>> + Send + 'static;
+
+    /// Transform each value and flatten (sync)
+    fn flat_map_sync<U, F>(self, f: F) -> Flow<U>
+    where
+        U: Send + 'static,
+        F: Fn(T) -> Flow<U> + Send + Sync + 'static;
+
+    /// Perform a side effect for each value (sync - Kotlin's onEach)
+    fn on_each<F>(self, f: F) -> Flow<T>
+    where
+        F: Fn(&T) + Send + Sync + 'static,
+        T: Clone;
+
+    /// Perform a side effect for each value (async)
+    fn on_each_async<F, Fut>(self, f: F) -> Flow<T>
+    where
+        F: Fn(&T) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+        T: Clone;
+
+    /// Skip the first n values (Kotlin's drop)
+    fn drop_first(self, count: usize) -> Flow<T>;
+
+    /// Skip values while predicate is true (sync)
+    fn drop_while<F>(self, predicate: F) -> Flow<T>
+    where
+        F: Fn(&T) -> bool + Send + Sync + 'static,
+        T: Clone;
+
+    /// Take values while predicate is true (sync)
+    fn take_while<F>(self, predicate: F) -> Flow<T>
+    where
+        F: Fn(&T) -> bool + Send + Sync + 'static,
+        T: Clone;
+
+    /// Only emit distinct consecutive values
+    fn distinct_until_changed(self) -> Flow<T>
+    where
+        T: Clone + PartialEq;
+
+    /// Only emit distinct consecutive values by key
+    fn distinct_until_changed_by<K, F>(self, key_selector: F) -> Flow<T>
+    where
+        K: PartialEq + Send + 'static,
+        F: Fn(&T) -> K + Send + Sync + 'static,
+        T: Clone;
 }
 
 impl<T> FlowExt<T> for Flow<T>
@@ -100,24 +181,48 @@ where
         Flow::new(move |collector| {
             let upstream = self.clone();
             async move {
-                let emitted = Arc::new(AtomicBool::new(false));
-                let mut remaining = count;
+                if count == 0 {
+                    return;
+                }
 
-                upstream
-                    .collect(move |value| {
-                        let collector = collector.clone();
-                        let emitted = Arc::clone(&emitted);
-                        async move {
-                            if remaining > 0 && !emitted.load(Ordering::SeqCst) {
-                                remaining -= 1;
-                                collector.emit(value).await;
-                                if remaining == 0 {
-                                    emitted.store(true, Ordering::SeqCst);
+                let (tx, mut rx) = mpsc::channel::<T>(1);
+                let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let done_clone = Arc::clone(&done);
+
+                // Spawn upstream collection
+                let producer = tokio::spawn(async move {
+                    upstream
+                        .collect(move |value| {
+                            let tx = tx.clone();
+                            let done = Arc::clone(&done_clone);
+                            async move {
+                                if done.load(Ordering::SeqCst) {
+                                    // Yield to allow task cancellation
+                                    tokio::task::yield_now().await;
+                                    return;
                                 }
+                                // This will block if receiver is full, allowing abort to work
+                                let _ = tx.send(value).await;
                             }
-                        }
-                    })
-                    .await;
+                        })
+                        .await;
+                });
+
+                // Receive exactly `count` values then stop
+                let mut received = 0;
+                while received < count {
+                    if let Some(value) = rx.recv().await {
+                        collector.emit(value).await;
+                        received += 1;
+                    } else {
+                        break; // Upstream completed
+                    }
+                }
+
+                // Signal upstream to stop and abort
+                done.store(true, Ordering::SeqCst);
+                drop(rx);
+                producer.abort();
             }
         })
     }
@@ -216,6 +321,308 @@ where
                 }
 
                 let _ = producer.await;
+            }
+        })
+    }
+
+    fn map_sync<U, F>(self, f: F) -> Flow<U>
+    where
+        U: Send + 'static,
+        F: Fn(T) -> U + Send + Sync + 'static,
+    {
+        let f = Arc::new(f);
+        Flow::new(move |collector| {
+            let upstream = self.clone();
+            let f = Arc::clone(&f);
+            async move {
+                upstream
+                    .collect(move |value| {
+                        let f = Arc::clone(&f);
+                        let collector = collector.clone();
+                        async move {
+                            let mapped = f(value);
+                            collector.emit(mapped).await;
+                        }
+                    })
+                    .await;
+            }
+        })
+    }
+
+    fn filter_sync<F>(self, predicate: F) -> Flow<T>
+    where
+        F: Fn(&T) -> bool + Send + Sync + 'static,
+        T: Clone,
+    {
+        let predicate = Arc::new(predicate);
+        Flow::new(move |collector| {
+            let upstream = self.clone();
+            let predicate = Arc::clone(&predicate);
+            async move {
+                upstream
+                    .collect(move |value| {
+                        let predicate = Arc::clone(&predicate);
+                        let collector = collector.clone();
+                        async move {
+                            if predicate(&value) {
+                                collector.emit(value).await;
+                            }
+                        }
+                    })
+                    .await;
+            }
+        })
+    }
+
+    fn flat_map_latest_sync<U, F>(self, f: F) -> Flow<U>
+    where
+        U: Send + 'static,
+        F: Fn(T) -> Flow<U> + Send + Sync + 'static,
+    {
+        let f = Arc::new(f);
+        self.flat_map_latest(move |value| {
+            let f = Arc::clone(&f);
+            async move { f(value) }
+        })
+    }
+
+    fn flat_map<U, F, Fut>(self, f: F) -> Flow<U>
+    where
+        U: Send + 'static,
+        F: Fn(T) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Flow<U>> + Send + 'static,
+    {
+        let f = Arc::new(f);
+        Flow::new(move |collector| {
+            let upstream = self.clone();
+            let f = Arc::clone(&f);
+            async move {
+                upstream
+                    .collect(move |value| {
+                        let f = Arc::clone(&f);
+                        let collector = collector.clone();
+                        async move {
+                            let inner_flow = f(value).await;
+                            inner_flow
+                                .collect(move |inner_value| {
+                                    let collector = collector.clone();
+                                    async move {
+                                        collector.emit(inner_value).await;
+                                    }
+                                })
+                                .await;
+                        }
+                    })
+                    .await;
+            }
+        })
+    }
+
+    fn flat_map_sync<U, F>(self, f: F) -> Flow<U>
+    where
+        U: Send + 'static,
+        F: Fn(T) -> Flow<U> + Send + Sync + 'static,
+    {
+        let f = Arc::new(f);
+        self.flat_map(move |value| {
+            let f = Arc::clone(&f);
+            async move { f(value) }
+        })
+    }
+
+    fn on_each<F>(self, f: F) -> Flow<T>
+    where
+        F: Fn(&T) + Send + Sync + 'static,
+        T: Clone,
+    {
+        let f = Arc::new(f);
+        Flow::new(move |collector| {
+            let upstream = self.clone();
+            let f = Arc::clone(&f);
+            async move {
+                upstream
+                    .collect(move |value| {
+                        let f = Arc::clone(&f);
+                        let collector = collector.clone();
+                        async move {
+                            f(&value);
+                            collector.emit(value).await;
+                        }
+                    })
+                    .await;
+            }
+        })
+    }
+
+    fn on_each_async<F, Fut>(self, f: F) -> Flow<T>
+    where
+        F: Fn(&T) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+        T: Clone,
+    {
+        let f = Arc::new(f);
+        Flow::new(move |collector| {
+            let upstream = self.clone();
+            let f = Arc::clone(&f);
+            async move {
+                upstream
+                    .collect(move |value| {
+                        let f = Arc::clone(&f);
+                        let collector = collector.clone();
+                        async move {
+                            f(&value).await;
+                            collector.emit(value).await;
+                        }
+                    })
+                    .await;
+            }
+        })
+    }
+
+    fn drop_first(self, count: usize) -> Flow<T> {
+        Flow::new(move |collector| {
+            let upstream = self.clone();
+            async move {
+                let dropped = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                upstream
+                    .collect(move |value| {
+                        let collector = collector.clone();
+                        let dropped = Arc::clone(&dropped);
+                        async move {
+                            let current = dropped.fetch_add(1, Ordering::SeqCst);
+                            if current >= count {
+                                collector.emit(value).await;
+                            }
+                        }
+                    })
+                    .await;
+            }
+        })
+    }
+
+    fn drop_while<F>(self, predicate: F) -> Flow<T>
+    where
+        F: Fn(&T) -> bool + Send + Sync + 'static,
+        T: Clone,
+    {
+        let predicate = Arc::new(predicate);
+        Flow::new(move |collector| {
+            let upstream = self.clone();
+            let predicate = Arc::clone(&predicate);
+            async move {
+                let dropping = Arc::new(AtomicBool::new(true));
+                upstream
+                    .collect(move |value| {
+                        let predicate = Arc::clone(&predicate);
+                        let collector = collector.clone();
+                        let dropping = Arc::clone(&dropping);
+                        async move {
+                            if dropping.load(Ordering::SeqCst) {
+                                if !predicate(&value) {
+                                    dropping.store(false, Ordering::SeqCst);
+                                    collector.emit(value).await;
+                                }
+                            } else {
+                                collector.emit(value).await;
+                            }
+                        }
+                    })
+                    .await;
+            }
+        })
+    }
+
+    fn take_while<F>(self, predicate: F) -> Flow<T>
+    where
+        F: Fn(&T) -> bool + Send + Sync + 'static,
+        T: Clone,
+    {
+        let predicate = Arc::new(predicate);
+        Flow::new(move |collector| {
+            let upstream = self.clone();
+            let predicate = Arc::clone(&predicate);
+            async move {
+                let done = Arc::new(AtomicBool::new(false));
+                upstream
+                    .collect(move |value| {
+                        let predicate = Arc::clone(&predicate);
+                        let collector = collector.clone();
+                        let done = Arc::clone(&done);
+                        async move {
+                            if !done.load(Ordering::SeqCst) && predicate(&value) {
+                                collector.emit(value).await;
+                            } else {
+                                done.store(true, Ordering::SeqCst);
+                            }
+                        }
+                    })
+                    .await;
+            }
+        })
+    }
+
+    fn distinct_until_changed(self) -> Flow<T>
+    where
+        T: Clone + PartialEq,
+    {
+        Flow::new(move |collector| {
+            let upstream = self.clone();
+            async move {
+                let last = Arc::new(tokio::sync::Mutex::new(None::<T>));
+                upstream
+                    .collect(move |value| {
+                        let collector = collector.clone();
+                        let last = Arc::clone(&last);
+                        async move {
+                            let mut guard = last.lock().await;
+                            let should_emit = match &*guard {
+                                None => true,
+                                Some(prev) => prev != &value,
+                            };
+                            if should_emit {
+                                *guard = Some(value.clone());
+                                drop(guard);
+                                collector.emit(value).await;
+                            }
+                        }
+                    })
+                    .await;
+            }
+        })
+    }
+
+    fn distinct_until_changed_by<K, F>(self, key_selector: F) -> Flow<T>
+    where
+        K: PartialEq + Send + 'static,
+        F: Fn(&T) -> K + Send + Sync + 'static,
+        T: Clone,
+    {
+        let key_selector = Arc::new(key_selector);
+        Flow::new(move |collector| {
+            let upstream = self.clone();
+            let key_selector = Arc::clone(&key_selector);
+            async move {
+                let last_key = Arc::new(tokio::sync::Mutex::new(None::<K>));
+                upstream
+                    .collect(move |value| {
+                        let collector = collector.clone();
+                        let last_key = Arc::clone(&last_key);
+                        let key_selector = Arc::clone(&key_selector);
+                        async move {
+                            let key = key_selector(&value);
+                            let mut guard = last_key.lock().await;
+                            let should_emit = match &*guard {
+                                None => true,
+                                Some(prev_key) => prev_key != &key,
+                            };
+                            if should_emit {
+                                *guard = Some(key);
+                                drop(guard);
+                                collector.emit(value).await;
+                            }
+                        }
+                    })
+                    .await;
             }
         })
     }

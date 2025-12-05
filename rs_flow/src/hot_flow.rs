@@ -51,6 +51,7 @@ where
     T: Clone + Send + Sync + 'static,
 {
     tx: watch::Sender<T>,
+    rx: watch::Receiver<T>,
 }
 
 impl<T> StateFlow<T>
@@ -59,8 +60,8 @@ where
 {
     /// Create a new StateFlow with an initial value
     pub fn new(initial: T) -> Self {
-        let (tx, _) = watch::channel(initial);
-        Self { tx }
+        let (tx, rx) = watch::channel(initial);
+        Self { tx, rx }
     }
 
     /// Update the state
@@ -75,17 +76,17 @@ where
 
     /// Get the current state
     pub fn get(&self) -> T {
-        self.tx.borrow().clone()
+        self.rx.borrow().clone()
     }
 
     /// Get a reference to the current state
     pub fn borrow(&self) -> watch::Ref<'_, T> {
-        self.tx.borrow()
+        self.rx.borrow()
     }
 
     /// Convert to a cold Flow that emits the current value and all updates
     pub fn as_flow(&self) -> Flow<T> {
-        let rx = self.tx.subscribe();
+        let rx = self.rx.clone();
         Flow::new(move |collector| {
             let mut rx = rx.clone();
             async move {
