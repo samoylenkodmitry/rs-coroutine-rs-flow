@@ -1,3 +1,6 @@
+#![forbid(unsafe_code)]
+#![deny(warnings)]
+
 pub mod builders;
 pub mod combining;
 pub mod flow;

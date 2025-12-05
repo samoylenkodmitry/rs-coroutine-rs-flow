@@ -2,9 +2,11 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+type FlowFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
+
 /// A collector that receives emitted values
 pub struct FlowCollector<T> {
-    emit_fn: Arc<dyn Fn(T) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>,
+    emit_fn: Arc<dyn Fn(T) -> FlowFuture + Send + Sync>,
 }
 
 impl<T> FlowCollector<T> {
@@ -35,9 +37,7 @@ impl<T> Clone for FlowCollector<T> {
 
 /// A cold flow that emits values when collected
 pub struct Flow<T> {
-    collect_fn: Arc<
-        dyn Fn(FlowCollector<T>) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync,
-    >,
+    collect_fn: Arc<dyn Fn(FlowCollector<T>) -> FlowFuture + Send + Sync>,
 }
 
 impl<T> Flow<T>

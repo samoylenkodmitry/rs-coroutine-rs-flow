@@ -47,9 +47,10 @@ impl Dispatchers {
     pub fn io() -> Dispatcher {
         Dispatcher::new(Arc::new(TokioExecutor))
     }
+}
 
-    /// Default dispatcher (alias for main)
-    pub fn default() -> Dispatcher {
-        Self::main()
+impl Default for Dispatcher {
+    fn default() -> Self {
+        Dispatchers::main()
     }
 }

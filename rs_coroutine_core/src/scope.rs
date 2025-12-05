@@ -65,9 +65,7 @@ impl CoroutineScope {
         });
 
         dispatcher.spawn(async move {
-            let res = CURRENT_SCOPE
-                .scope(child_scope, async move { fut.await })
-                .await;
+            let res = CURRENT_SCOPE.scope(child_scope, fut).await;
             let _ = tx.send(res);
         });
 
@@ -89,9 +87,7 @@ impl CoroutineScope {
         let job = child_scope.job.clone();
 
         dispatcher.spawn(async move {
-            let res = CURRENT_SCOPE
-                .scope(child_scope, async move { fut.await })
-                .await;
+            let res = CURRENT_SCOPE.scope(child_scope, fut).await;
             let _ = tx.send(res);
         });
 
@@ -129,17 +125,15 @@ impl<T> Deferred<T> {
 }
 
 /// Helper to access the current scope
-pub fn with_current_scope<F, Fut, T>(f: F) -> impl Future<Output = T>
+pub async fn with_current_scope<F, Fut, T>(f: F) -> T
 where
     F: FnOnce(&CoroutineScope) -> Fut,
     Fut: Future<Output = T>,
 {
-    async move {
-        CURRENT_SCOPE.with(|scope| f(scope)).await
-    }
+    CURRENT_SCOPE.with(|scope| f(scope)).await
 }
 
 /// Helper to get a reference to the current scope (for macros)
 pub fn get_current_scope() -> Arc<CoroutineScope> {
-    CURRENT_SCOPE.with(|scope| Arc::clone(scope))
+    CURRENT_SCOPE.with(Arc::clone)
 }

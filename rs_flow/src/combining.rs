@@ -191,13 +191,8 @@ where
                 });
 
                 // Zip values
-                loop {
-                    match (rx1.recv().await, rx2.recv().await) {
-                        (Some(v1), Some(v2)) => {
-                            collector.emit(transform(v1, v2)).await;
-                        }
-                        _ => break, // Either flow completed
-                    }
+                while let (Some(v1), Some(v2)) = (rx1.recv().await, rx2.recv().await) {
+                    collector.emit(transform(v1, v2)).await;
                 }
 
                 let _ = task1.await;

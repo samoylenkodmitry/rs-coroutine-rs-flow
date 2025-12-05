@@ -40,8 +40,7 @@ where
     /// ```
     fn on_completion<F, Fut>(self, action: F) -> Flow<T>
     where
-        F: FnOnce(FlowCollector<T>, Option<Box<dyn std::error::Error + Send + Sync>>)
-                -> Fut
+        F: FnOnce(FlowCollector<T>, Option<Box<dyn std::error::Error + Send + Sync>>) -> Fut
             + Send
             + Sync
             + 'static
@@ -130,8 +129,7 @@ where
 
     fn on_completion<F, Fut>(self, action: F) -> Flow<T>
     where
-        F: FnOnce(FlowCollector<T>, Option<Box<dyn std::error::Error + Send + Sync>>)
-                -> Fut
+        F: FnOnce(FlowCollector<T>, Option<Box<dyn std::error::Error + Send + Sync>>) -> Fut
             + Send
             + Sync
             + 'static
