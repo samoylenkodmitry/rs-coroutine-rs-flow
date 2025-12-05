@@ -18,3 +18,7 @@ proc-macro = false
 [[example]]
 name = "basic_usage"
 path = "../examples/basic_usage.rs"
+
+[[example]]
+name = "kotlin_style_api"
+path = "../examples/kotlin_style_api.rs"
