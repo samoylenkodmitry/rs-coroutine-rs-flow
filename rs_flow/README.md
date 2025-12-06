@@ -13,8 +13,8 @@ Add `coroflow` and its companion runtime to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-rs_coroutine_core = "0.1.0"
-coroflow = "0.1.0"
+rs_coroutine_core = "0.1.1"
+coroflow = "0.1.1"
 tokio = { version = "1.35", features = ["full"] }
 ```
 
