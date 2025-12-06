@@ -1,4 +1,4 @@
-use rs_flow::{flow, FlowCollector, FlowError, FlowTerminal};
+use coroflow::{flow, FlowCollector, FlowError, FlowTerminal};
 
 #[tokio::test]
 async fn terminal_collectors_handle_counts_and_aggregation() {

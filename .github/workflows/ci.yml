@@ -54,7 +54,7 @@ jobs:
           CRATES_IO_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
         run: cargo publish -p rs_coroutine_core --token "$CRATES_IO_TOKEN"
 
-      - name: Publish rs_flow to crates.io
+      - name: Publish coroflow to crates.io
         env:
           CRATES_IO_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
-        run: cargo publish -p rs_flow --token "$CRATES_IO_TOKEN"
+        run: cargo publish -p coroflow --token "$CRATES_IO_TOKEN"
