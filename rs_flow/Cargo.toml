@@ -6,6 +6,7 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 description.workspace = true
+readme = "README.md"
 
 [dependencies]
 rs_coroutine_core = { version = "0.1.0", path = "../rs_coroutine_core" }
