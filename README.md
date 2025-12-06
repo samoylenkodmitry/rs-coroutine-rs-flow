@@ -41,8 +41,8 @@ Add the dependencies to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-rs_coroutine_core = "0.1.0"
-coroflow = "0.1.0"
+rs_coroutine_core = "0.1.1"
+coroflow = "0.1.1"
 tokio = { version = "1.35", features = ["full"] }
 ```
 
@@ -241,7 +241,7 @@ See [rs-coroutine-rs-flow-spec.md](rs-coroutine-rs-flow-spec.md) for the complet
 ## Releases and crates.io publishing
 
 - A GitHub Actions workflow builds and tests every push and pull request.
-- Creating a tag that starts with `v` (for example `v0.1.0`) triggers a release build and publishes both crates to crates.io.
+- Creating a tag that starts with `v` (for example `v0.1.1`) triggers a release build and publishes both crates to crates.io.
 - The workflow expects a repository secret named `CRATES_IO_TOKEN` containing a crates.io API token with publish rights for
   `rs_coroutine_core` and `coroflow`. The Flow crate was renamed to **coroflow** to meet crates.io naming guidelines; be sure to depend on the new name when publishing.
 

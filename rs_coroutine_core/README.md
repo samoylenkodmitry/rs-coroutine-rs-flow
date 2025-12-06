@@ -14,7 +14,7 @@ Add the crate to your project:
 
 ```toml
 [dependencies]
-rs_coroutine_core = "0.1.0"
+rs_coroutine_core = "0.1.1"
 tokio = { version = "1.35", features = ["full"] }
 ```
 
