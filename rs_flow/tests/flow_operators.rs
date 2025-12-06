@@ -1,4 +1,4 @@
-use rs_flow::{flow, FlowExt};
+use coroflow::{flow, FlowExt};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 

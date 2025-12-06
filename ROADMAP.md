@@ -199,7 +199,7 @@ Convert cold flows to hot flows.
 ### Current API (What works today)
 
 ```rust
-use rs_flow::{flow, Flow, FlowExt, StateFlow, Dispatchers};
+use coroflow::{flow, Flow, FlowExt, StateFlow, Dispatchers};
 
 // Create a flow
 let numbers: Flow<i32> = flow! {
@@ -227,7 +227,7 @@ println!("Value: {}", state.get());
 ### Target API (After roadmap completion)
 
 ```rust
-use rs_flow::{flow, flowOf, Flow, FlowExt};
+use coroflow::{flow, flowOf, Flow, FlowExt};
 
 // Easy flow creation
 let numbers = flowOf!(1, 2, 3, 4, 5);

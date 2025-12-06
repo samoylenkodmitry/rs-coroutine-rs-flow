@@ -1,5 +1,5 @@
 [package]
-name = "rs_flow"
+name = "coroflow"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

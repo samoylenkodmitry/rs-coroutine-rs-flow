@@ -1,5 +1,5 @@
+use coroflow::{flow, FlowExt, SharedFlow, StateFlow, SuspendingExt};
 use rs_coroutine_core::{CoroutineScope, Dispatchers};
-use rs_flow::{flow, FlowExt, SharedFlow, StateFlow, SuspendingExt};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
