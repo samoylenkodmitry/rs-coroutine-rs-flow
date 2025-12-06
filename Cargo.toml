@@ -11,6 +11,7 @@ edition = "2021"
 authors = ["rs-coroutine contributors"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/samoylenkodmitry/rs-coroutine-rs-flow"
+description = "Composable coroutine utilities and flow abstractions built on top of Rust's async ecosystem"
 
 [workspace.dependencies]
 tokio = { version = "1.35", features = ["full"] }
