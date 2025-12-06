@@ -52,9 +52,33 @@ jobs:
       - name: Publish rs_coroutine_core to crates.io
         env:
           CRATES_IO_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
-        run: cargo publish -p rs_coroutine_core --token "$CRATES_IO_TOKEN"
+        run: |
+          set -o pipefail
+
+          publish_output=$(cargo publish -p rs_coroutine_core --token "$CRATES_IO_TOKEN" 2>&1) || status=$?
+          echo "$publish_output"
+
+          if [ "${status:-0}" -ne 0 ]; then
+            if echo "$publish_output" | grep -q "crate .* already exists"; then
+              echo "rs_coroutine_core already published, continuing."
+            else
+              exit "$status"
+            fi
+          fi
 
       - name: Publish coroflow to crates.io
         env:
           CRATES_IO_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
-        run: cargo publish -p coroflow --token "$CRATES_IO_TOKEN"
+        run: |
+          set -o pipefail
+
+          publish_output=$(cargo publish -p coroflow --token "$CRATES_IO_TOKEN" 2>&1) || status=$?
+          echo "$publish_output"
+
+          if [ "${status:-0}" -ne 0 ]; then
+            if echo "$publish_output" | grep -q "crate .* already exists"; then
+              echo "coroflow already published, continuing."
+            else
+              exit "$status"
+            fi
+          fi
