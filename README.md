@@ -1,4 +1,4 @@
-# rs-coroutine / rs-flow
+# rs-coroutine / coroflow
 
 A Kotlin-style coroutine and Flow framework for Rust, bringing familiar coroutine patterns to Rust developers who are accustomed to Kotlin's coroutines and Flow API.
 
@@ -7,7 +7,7 @@ A Kotlin-style coroutine and Flow framework for Rust, bringing familiar coroutin
 This project provides two main crates:
 
 - **rs_coroutine_core**: Core coroutine runtime with structured concurrency, dispatchers, and task-local scopes
-- **rs_flow**: Cold and hot Flow implementations with operators, similar to Kotlin's Flow API
+- **coroflow**: Cold and hot Flow implementations with operators, similar to Kotlin's Flow API
 
 ## Features
 
@@ -21,7 +21,7 @@ This project provides two main crates:
 - **Task-local Scope**: `CURRENT_SCOPE` provides ambient scope access
 - **Suspending Blocks**: `suspend_block!` macro for creating reusable suspending computations
 
-### rs_flow
+### coroflow
 
 - **Cold Flows**: `Flow<T>` that only executes when collected
 - **Hot Flows**: `SharedFlow<T>` and `StateFlow<T>` for multicasting values
@@ -41,8 +41,8 @@ Add the dependencies to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-rs_coroutine_core = { path = "rs_coroutine_core" }
-rs_flow = { path = "rs_flow" }
+rs_coroutine_core = "0.1.0"
+coroflow = "0.1.0"
 tokio = { version = "1.35", features = ["full"] }
 ```
 
@@ -94,7 +94,7 @@ async fn main() {
 ### Cold Flows
 
 ```rust
-use rs_flow::{flow, FlowExt};
+use coroflow::{flow, FlowExt};
 
 #[tokio::main]
 async fn main() {
@@ -120,7 +120,7 @@ async fn main() {
 ### Hot Flows (SharedFlow and StateFlow)
 
 ```rust
-use rs_flow::{SharedFlow, StateFlow, FlowExt};
+use coroflow::{SharedFlow, StateFlow, FlowExt};
 use tokio::time::{sleep, Duration};
 
 #[tokio::main]
@@ -184,7 +184,7 @@ async fn main() {
 
 ```rust
 use rs_coroutine_core::suspend_block;
-use rs_flow::SuspendingExt;
+use coroflow::SuspendingExt;
 
 #[tokio::main]
 async fn main() {
@@ -237,6 +237,17 @@ The `Dispatcher` wraps an `Executor` trait, allowing you to plug in any async ru
 ## Specification
 
 See [rs-coroutine-rs-flow-spec.md](rs-coroutine-rs-flow-spec.md) for the complete specification.
+
+## Releases and crates.io publishing
+
+- A GitHub Actions workflow builds and tests every push and pull request.
+- Creating a tag that starts with `v` (for example `v0.1.0`) triggers a release build and publishes both crates to crates.io.
+- The workflow expects a repository secret named `CRATES_IO_TOKEN` containing a crates.io API token with publish rights for
+  `rs_coroutine_core` and `coroflow`.
+
+> Note: The Flow crate was renamed to `coroflow` to avoid a crates.io name collision.
+
+Ensure the workspace version matches the tag before publishing.
 
 ## License
 

@@ -1,13 +1,14 @@
 [package]
-name = "rs_flow"
+name = "coroflow"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+description.workspace = true
 
 [dependencies]
-rs_coroutine_core = { path = "../rs_coroutine_core" }
+rs_coroutine_core = { version = "0.1.0", path = "../rs_coroutine_core" }
 tokio = { workspace = true }
 futures = { workspace = true }
 pin-project = { workspace = true }

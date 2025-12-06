@@ -18,7 +18,7 @@
 ```
 rs-coroutine/
   rs_coroutine_core/  // CoroutineScope, Dispatchers, Job, macros
-  rs_flow/            // Flow, Suspending<T>, SharedFlow/StateFlow
+  rs_flow/            // Flow, Suspending<T>, SharedFlow/StateFlow (published as `coroflow`)
 ```
 
 - `rs_coroutine_core` implements the coroutine runtime and macros:
@@ -29,7 +29,7 @@ rs-coroutine/
   - The helper `with_current_scope`.
   - Macros: `#[suspend]`, `suspend_block!`.
 
-- `rs_flow`:
+- `coroflow`:
   - The core `Flow<T>` type and `FlowCollector<T>`.
   - `Suspending<T>` and `.as_flow()`.
   - Builders like `flow`, `flow_block!`.

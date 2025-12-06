@@ -7,7 +7,7 @@
 ///
 /// # Example
 /// ```ignore
-/// use rs_flow::flow;
+/// use coroflow::flow;
 ///
 /// // Kotlin-like syntax
 /// let numbers = flow! {
@@ -178,7 +178,7 @@ macro_rules! async_task {
 ///
 /// # Example
 /// ```rust
-/// use rs_flow::state_flow;
+/// use coroflow::state_flow;
 ///
 /// let counter = state_flow!(0);
 /// counter.set(1);
@@ -195,7 +195,7 @@ macro_rules! state_flow {
 ///
 /// # Example
 /// ```rust
-/// use rs_flow::shared_flow;
+/// use coroflow::shared_flow;
 ///
 /// let events = shared_flow!(16);
 /// events.emit("event");

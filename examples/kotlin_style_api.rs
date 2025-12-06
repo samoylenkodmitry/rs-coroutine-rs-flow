@@ -3,7 +3,7 @@
 //! This example shows how to use the ergonomic API that reduces boilerplate
 //! and provides a familiar experience for Kotlin developers.
 
-use rs_flow::{flow, flow_fn, shared_flow, state_flow, Flow, FlowExt};
+use coroflow::{flow, flow_fn, shared_flow, state_flow, Flow, FlowExt};
 use std::time::Duration;
 use tokio::time::sleep;
 
