@@ -4,6 +4,13 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+/// Helper to check if the current scope is cancelled (if available)
+/// Returns true if cancelled, false otherwise or if not in a scope
+fn is_scope_cancelled() -> bool {
+    use crate::CURRENT_SCOPE;
+    CURRENT_SCOPE.try_with(|scope| scope.is_cancelled()).unwrap_or(false)
+}
+
 impl<T> FlowExt<T> for Flow<T>
 where
     T: Send + 'static,
@@ -24,6 +31,10 @@ where
                         let f = Arc::clone(&f);
                         let collector = collector.clone();
                         async move {
+                            // Check cancellation before processing
+                            if is_scope_cancelled() {
+                                return;
+                            }
                             let mapped = f(value).await;
                             collector.emit(mapped).await;
                         }
@@ -49,6 +60,10 @@ where
                         let predicate = Arc::clone(&predicate);
                         let collector = collector.clone();
                         async move {
+                            // Check cancellation before processing
+                            if is_scope_cancelled() {
+                                return;
+                            }
                             if predicate(&value).await {
                                 collector.emit(value).await;
                             }
@@ -127,6 +142,12 @@ where
                 });
 
                 while let Some(value) = rx.recv().await {
+                    // Check cancellation before emitting
+                    if is_scope_cancelled() {
+                        drop(rx);
+                        producer.abort();
+                        return;
+                    }
                     collector.emit(value).await;
                 }
 
@@ -190,16 +211,33 @@ where
                     }
                 });
 
+                let mut current_collector: Option<tokio::task::JoinHandle<()>> = None;
+
                 while let Some(inner_flow) = rx.recv().await {
+                    // Cancel the previous inner flow collection
+                    if let Some(handle) = current_collector.take() {
+                        handle.abort();
+                    }
+
+                    // Start collecting the new inner flow
                     let collector = collector.clone();
-                    inner_flow
-                        .collect(move |value| {
-                            let collector = collector.clone();
-                            async move {
-                                collector.emit(value).await;
-                            }
-                        })
-                        .await;
+                    let handle = tokio::spawn(async move {
+                        inner_flow
+                            .collect(move |value| {
+                                let collector = collector.clone();
+                                async move {
+                                    collector.emit(value).await;
+                                }
+                            })
+                            .await;
+                    });
+
+                    current_collector = Some(handle);
+                }
+
+                // Wait for the last inner flow to complete
+                if let Some(handle) = current_collector {
+                    let _ = handle.await;
                 }
 
                 let _ = producer.await;
@@ -222,6 +260,10 @@ where
                         let f = Arc::clone(&f);
                         let collector = collector.clone();
                         async move {
+                            // Check cancellation before processing
+                            if is_scope_cancelled() {
+                                return;
+                            }
                             let mapped = f(value);
                             collector.emit(mapped).await;
                         }
@@ -246,6 +288,10 @@ where
                         let predicate = Arc::clone(&predicate);
                         let collector = collector.clone();
                         async move {
+                            // Check cancellation before processing
+                            if is_scope_cancelled() {
+                                return;
+                            }
                             if predicate(&value) {
                                 collector.emit(value).await;
                             }

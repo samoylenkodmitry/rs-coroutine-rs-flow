@@ -3,18 +3,24 @@ use std::sync::Arc;
 use tokio::sync::Notify;
 
 /// A cancellation token for cooperative cancellation
+///
+/// Supports hierarchical cancellation: when a parent token is cancelled,
+/// all child tokens are automatically considered cancelled as well.
+/// Children can also be cancelled independently without affecting the parent.
 #[derive(Clone)]
 pub struct CancelToken {
     cancelled: Arc<AtomicBool>,
     notify: Arc<Notify>,
+    parent: Option<Arc<CancelToken>>,
 }
 
 impl CancelToken {
-    /// Create a new CancelToken
+    /// Create a new root CancelToken
     pub fn new() -> Self {
         Self {
             cancelled: Arc::new(AtomicBool::new(false)),
             notify: Arc::new(Notify::new()),
+            parent: None,
         }
     }
 
@@ -25,21 +31,53 @@ impl CancelToken {
     }
 
     /// Check if this token is cancelled
+    /// This checks both this token and all parent tokens in the hierarchy
     pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::SeqCst)
+        // Check our own cancellation first
+        if self.cancelled.load(Ordering::SeqCst) {
+            return true;
+        }
+
+        // Check parent cancellation (recursively walks up the hierarchy)
+        if let Some(parent) = &self.parent {
+            return parent.is_cancelled();
+        }
+
+        false
     }
 
     /// Wait for cancellation
+    /// This will return when either this token or any parent token is cancelled
     pub async fn cancelled(&self) {
         if self.is_cancelled() {
             return;
         }
-        self.notify.notified().await;
+
+        // We need to wait on both our own notify and parent's
+        // Create a future that completes when either this token or parent is cancelled
+        let own_notified = self.notify.notified();
+
+        if let Some(parent) = &self.parent {
+            // Box the recursive call to avoid infinite size
+            let parent_cancelled = Box::pin(parent.cancelled());
+            tokio::select! {
+                _ = own_notified => {},
+                _ = parent_cancelled => {},
+            }
+        } else {
+            own_notified.await;
+        }
     }
 
-    /// Create a child token that can be cancelled independently
+    /// Create a child token that is linked to this parent
+    /// The child will be automatically cancelled when the parent is cancelled,
+    /// but can also be cancelled independently without affecting the parent.
     pub fn child(&self) -> Self {
-        Self::new()
+        Self {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            notify: Arc::new(Notify::new()),
+            parent: Some(Arc::new(self.clone())),
+        }
     }
 }
 

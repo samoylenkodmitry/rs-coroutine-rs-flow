@@ -1,4 +1,3 @@
-#![forbid(unsafe_code)]
 #![deny(warnings)]
 
 pub mod builders;
@@ -33,8 +32,9 @@ pub use combining::{merge, FlowCombining};
 
 // Re-export common items from rs_coroutine_core
 pub use rs_coroutine_core::{
-    get_current_scope, suspend_block, with_current_scope, CancelToken, CoroutineScope, Deferred,
-    Dispatcher, Dispatchers, Executor, JobHandle, Suspending, TokioExecutor, CURRENT_SCOPE,
+    check_cancellation, get_current_scope, suspend_block, with_current_scope, yield_now,
+    CancelToken, CancellationError, CoroutineScope, Deferred, Dispatcher, Dispatchers, Executor,
+    JobHandle, Suspending, TokioExecutor, CURRENT_SCOPE,
 };
 
 // Re-export scope module for macros
