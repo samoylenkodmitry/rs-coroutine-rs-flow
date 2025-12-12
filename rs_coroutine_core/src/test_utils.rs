@@ -26,7 +26,6 @@
 ///     // All pending work is complete
 /// }
 /// ```
-
 use crate::{CoroutineScope, Dispatcher, Dispatchers, JobHandle};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -117,7 +116,8 @@ impl TestScope {
     /// ```
     pub async fn advance_time_by(&self, duration: Duration) {
         advance(duration).await;
-        self.virtual_time.fetch_add(duration.as_millis() as u64, Ordering::SeqCst);
+        self.virtual_time
+            .fetch_add(duration.as_millis() as u64, Ordering::SeqCst);
     }
 
     /// Advance virtual time by the specified number of milliseconds
@@ -448,6 +448,7 @@ mod tests {
 
             scope.advance_time_by_millis(200).await;
             assert!(completed.load(Ordering::SeqCst));
-        }).await;
+        })
+        .await;
     }
 }

@@ -224,16 +224,18 @@ async fn test_check_cancellation_function() {
 
     let result_clone = Arc::clone(&result);
     let job = scope.launch(async move {
-        CURRENT_SCOPE.with(|_| async {
-            for _ in 0..10 {
-                // Use the check_cancellation function
-                if check_cancellation().is_err() {
-                    return;
+        CURRENT_SCOPE
+            .with(|_| async {
+                for _ in 0..10 {
+                    // Use the check_cancellation function
+                    if check_cancellation().is_err() {
+                        return;
+                    }
+                    yield_now().await;
                 }
-                yield_now().await;
-            }
-            result_clone.store(true, Ordering::SeqCst);
-        }).await;
+                result_clone.store(true, Ordering::SeqCst);
+            })
+            .await;
     });
 
     // Cancel immediately

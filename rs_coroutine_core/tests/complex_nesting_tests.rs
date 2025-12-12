@@ -2,7 +2,7 @@ use rs_coroutine_core::*;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::{sleep, advance, pause};
+use tokio::time::{advance, pause, sleep};
 
 /// Complex nested structure with multiple levels and branches
 #[tokio::test]
@@ -27,40 +27,68 @@ async fn test_deeply_nested_cancellation() {
 
         let root_l1 = root_clone.clone();
         let counters = counters.clone();
-        let _result = root_clone.with_dispatcher(Dispatchers::io(), async move {
-            counters[1].fetch_add(1, Ordering::SeqCst);
+        let _result = root_clone
+            .with_dispatcher(Dispatchers::io(), async move {
+                counters[1].fetch_add(1, Ordering::SeqCst);
 
-            let root_l2 = root_l1.clone();
-            let counters = counters.clone();
-            let _result = root_l1.with_dispatcher(Dispatchers::io(), async move {
-                counters[2].fetch_add(1, Ordering::SeqCst);
-
-                let root_l3 = root_l2.clone();
+                let root_l2 = root_l1.clone();
                 let counters = counters.clone();
-                let _result = root_l2.with_dispatcher(Dispatchers::io(), async move {
-                    counters[3].fetch_add(1, Ordering::SeqCst);
+                let _result = root_l1
+                    .with_dispatcher(Dispatchers::io(), async move {
+                        counters[2].fetch_add(1, Ordering::SeqCst);
 
-                    let counters = counters.clone();
-                    let _result = root_l3.with_dispatcher(Dispatchers::io(), async move {
-                        counters[4].fetch_add(1, Ordering::SeqCst);
+                        let root_l3 = root_l2.clone();
+                        let counters = counters.clone();
+                        let _result = root_l2
+                            .with_dispatcher(Dispatchers::io(), async move {
+                                counters[3].fetch_add(1, Ordering::SeqCst);
 
-                        // Deepest level - long running work
-                        sleep(Duration::from_secs(1000)).await;
-                    }).await;
-                }).await;
-            }).await;
-        }).await;
+                                let counters = counters.clone();
+                                let _result = root_l3
+                                    .with_dispatcher(Dispatchers::io(), async move {
+                                        counters[4].fetch_add(1, Ordering::SeqCst);
+
+                                        // Deepest level - long running work
+                                        sleep(Duration::from_secs(1000)).await;
+                                    })
+                                    .await;
+                            })
+                            .await;
+                    })
+                    .await;
+            })
+            .await;
     });
 
     // Advance time to let everything start
     advance(Duration::from_millis(10)).await;
 
     // All levels should have started
-    assert_eq!(level_counters[0].load(Ordering::SeqCst), 1, "Level 1 should have started");
-    assert_eq!(level_counters[1].load(Ordering::SeqCst), 1, "Level 2 should have started");
-    assert_eq!(level_counters[2].load(Ordering::SeqCst), 1, "Level 3 should have started");
-    assert_eq!(level_counters[3].load(Ordering::SeqCst), 1, "Level 4 should have started");
-    assert_eq!(level_counters[4].load(Ordering::SeqCst), 1, "Level 5 should have started");
+    assert_eq!(
+        level_counters[0].load(Ordering::SeqCst),
+        1,
+        "Level 1 should have started"
+    );
+    assert_eq!(
+        level_counters[1].load(Ordering::SeqCst),
+        1,
+        "Level 2 should have started"
+    );
+    assert_eq!(
+        level_counters[2].load(Ordering::SeqCst),
+        1,
+        "Level 3 should have started"
+    );
+    assert_eq!(
+        level_counters[3].load(Ordering::SeqCst),
+        1,
+        "Level 4 should have started"
+    );
+    assert_eq!(
+        level_counters[4].load(Ordering::SeqCst),
+        1,
+        "Level 5 should have started"
+    );
 
     // Cancel root - should cancel all descendants
     root.cancel();
@@ -93,10 +121,12 @@ async fn test_complex_tree_cancellation() {
     let job_a = root.launch(async move {
         let status = status.clone();
         let root = root_clone.clone();
-        let _result = root.with_dispatcher(Dispatchers::io(), async move {
-            sleep(Duration::from_secs(100)).await;
-            status[0].store(true, Ordering::SeqCst);
-        }).await;
+        let _result = root
+            .with_dispatcher(Dispatchers::io(), async move {
+                sleep(Duration::from_secs(100)).await;
+                status[0].store(true, Ordering::SeqCst);
+            })
+            .await;
     });
 
     // Branch B: Medium nesting (3 levels)
@@ -105,13 +135,17 @@ async fn test_complex_tree_cancellation() {
     let job_b = root.launch(async move {
         let status = status.clone();
         let root_l1 = root_clone.clone();
-        let _result = root_clone.with_dispatcher(Dispatchers::io(), async move {
-            let status = status.clone();
-            let _result = root_l1.with_dispatcher(Dispatchers::io(), async move {
-                sleep(Duration::from_secs(100)).await;
-                status[1].store(true, Ordering::SeqCst);
-            }).await;
-        }).await;
+        let _result = root_clone
+            .with_dispatcher(Dispatchers::io(), async move {
+                let status = status.clone();
+                let _result = root_l1
+                    .with_dispatcher(Dispatchers::io(), async move {
+                        sleep(Duration::from_secs(100)).await;
+                        status[1].store(true, Ordering::SeqCst);
+                    })
+                    .await;
+            })
+            .await;
     });
 
     // Branch C: Deep nesting (4 levels)
@@ -120,17 +154,23 @@ async fn test_complex_tree_cancellation() {
     let job_c = root.launch(async move {
         let status = status.clone();
         let root_l1 = root_clone.clone();
-        let _result = root_clone.with_dispatcher(Dispatchers::io(), async move {
-            let status = status.clone();
-            let root_l2 = root_l1.clone();
-            let _result = root_l1.with_dispatcher(Dispatchers::io(), async move {
+        let _result = root_clone
+            .with_dispatcher(Dispatchers::io(), async move {
                 let status = status.clone();
-                let _result = root_l2.with_dispatcher(Dispatchers::io(), async move {
-                    sleep(Duration::from_secs(100)).await;
-                    status[2].store(true, Ordering::SeqCst);
-                }).await;
-            }).await;
-        }).await;
+                let root_l2 = root_l1.clone();
+                let _result = root_l1
+                    .with_dispatcher(Dispatchers::io(), async move {
+                        let status = status.clone();
+                        let _result = root_l2
+                            .with_dispatcher(Dispatchers::io(), async move {
+                                sleep(Duration::from_secs(100)).await;
+                                status[2].store(true, Ordering::SeqCst);
+                            })
+                            .await;
+                    })
+                    .await;
+            })
+            .await;
     });
 
     // Branch D: Very deep nesting (5 levels)
@@ -139,21 +179,29 @@ async fn test_complex_tree_cancellation() {
     let job_d = root.launch(async move {
         let status = status.clone();
         let root_l1 = root_clone.clone();
-        let _result = root_clone.with_dispatcher(Dispatchers::io(), async move {
-            let status = status.clone();
-            let root_l2 = root_l1.clone();
-            let _result = root_l1.with_dispatcher(Dispatchers::io(), async move {
+        let _result = root_clone
+            .with_dispatcher(Dispatchers::io(), async move {
                 let status = status.clone();
-                let root_l3 = root_l2.clone();
-                let _result = root_l2.with_dispatcher(Dispatchers::io(), async move {
-                    let status = status.clone();
-                    let _result = root_l3.with_dispatcher(Dispatchers::io(), async move {
-                        sleep(Duration::from_secs(100)).await;
-                        status[3].store(true, Ordering::SeqCst);
-                    }).await;
-                }).await;
-            }).await;
-        }).await;
+                let root_l2 = root_l1.clone();
+                let _result = root_l1
+                    .with_dispatcher(Dispatchers::io(), async move {
+                        let status = status.clone();
+                        let root_l3 = root_l2.clone();
+                        let _result = root_l2
+                            .with_dispatcher(Dispatchers::io(), async move {
+                                let status = status.clone();
+                                let _result = root_l3
+                                    .with_dispatcher(Dispatchers::io(), async move {
+                                        sleep(Duration::from_secs(100)).await;
+                                        status[3].store(true, Ordering::SeqCst);
+                                    })
+                                    .await;
+                            })
+                            .await;
+                    })
+                    .await;
+            })
+            .await;
     });
 
     // Let all branches start
@@ -170,10 +218,22 @@ async fn test_complex_tree_cancellation() {
     job_d.join().await;
 
     // None of the branches should have completed
-    assert!(!branch_status[0].load(Ordering::SeqCst), "Branch A should not complete");
-    assert!(!branch_status[1].load(Ordering::SeqCst), "Branch B should not complete");
-    assert!(!branch_status[2].load(Ordering::SeqCst), "Branch C should not complete");
-    assert!(!branch_status[3].load(Ordering::SeqCst), "Branch D should not complete");
+    assert!(
+        !branch_status[0].load(Ordering::SeqCst),
+        "Branch A should not complete"
+    );
+    assert!(
+        !branch_status[1].load(Ordering::SeqCst),
+        "Branch B should not complete"
+    );
+    assert!(
+        !branch_status[2].load(Ordering::SeqCst),
+        "Branch C should not complete"
+    );
+    assert!(
+        !branch_status[3].load(Ordering::SeqCst),
+        "Branch D should not complete"
+    );
 }
 
 /// Test diamond-shaped dependency graph
@@ -209,20 +269,24 @@ async fn test_diamond_dependency_cancellation() {
         // Left path
         let left_job = CURRENT_SCOPE.with(|scope| {
             scope.launch(async move {
-                let _result = root_left.with_dispatcher(Dispatchers::io(), async move {
-                    sleep(Duration::from_millis(50)).await;
-                    flags_left[1].store(true, Ordering::SeqCst);
-                }).await;
+                let _result = root_left
+                    .with_dispatcher(Dispatchers::io(), async move {
+                        sleep(Duration::from_millis(50)).await;
+                        flags_left[1].store(true, Ordering::SeqCst);
+                    })
+                    .await;
             })
         });
 
         // Right path
         let right_job = CURRENT_SCOPE.with(|scope| {
             scope.launch(async move {
-                let _result = root_right.with_dispatcher(Dispatchers::io(), async move {
-                    sleep(Duration::from_millis(50)).await;
-                    flags_right[2].store(true, Ordering::SeqCst);
-                }).await;
+                let _result = root_right
+                    .with_dispatcher(Dispatchers::io(), async move {
+                        sleep(Duration::from_millis(50)).await;
+                        flags_right[2].store(true, Ordering::SeqCst);
+                    })
+                    .await;
             })
         });
 
@@ -272,39 +336,47 @@ async fn test_fan_out_cancellation() {
             let child_job = CURRENT_SCOPE.with(|scope| {
                 scope.launch(async move {
                     let root_for_inner = root.clone();
-                    let _result = root.with_dispatcher(Dispatchers::io(), async move {
-                        // Each child has different nesting depth
-                        let depth = i % 3;
-                        let completed = completed.clone();
-                        let root = root_for_inner.clone();
+                    let _result = root
+                        .with_dispatcher(Dispatchers::io(), async move {
+                            // Each child has different nesting depth
+                            let depth = i % 3;
+                            let completed = completed.clone();
+                            let root = root_for_inner.clone();
 
-                        match depth {
-                            0 => {
-                                sleep(Duration::from_secs(10)).await;
-                                completed.fetch_add(1, Ordering::SeqCst);
-                            },
-                            1 => {
-                                let completed = completed.clone();
-                                let root_clone_inner = root.clone();
-                                let _result = root_clone_inner.with_dispatcher(Dispatchers::io(), async move {
+                            match depth {
+                                0 => {
                                     sleep(Duration::from_secs(10)).await;
                                     completed.fetch_add(1, Ordering::SeqCst);
-                                }).await;
-                            },
-                            _ => {
-                                let root_l1 = root.clone();
-                                let completed = completed.clone();
-                                let root_clone_inner = root.clone();
-                                let _result = root_clone_inner.with_dispatcher(Dispatchers::io(), async move {
+                                }
+                                1 => {
                                     let completed = completed.clone();
-                                    let _result = root_l1.with_dispatcher(Dispatchers::io(), async move {
-                                        sleep(Duration::from_secs(10)).await;
-                                        completed.fetch_add(1, Ordering::SeqCst);
-                                    }).await;
-                                }).await;
+                                    let root_clone_inner = root.clone();
+                                    let _result = root_clone_inner
+                                        .with_dispatcher(Dispatchers::io(), async move {
+                                            sleep(Duration::from_secs(10)).await;
+                                            completed.fetch_add(1, Ordering::SeqCst);
+                                        })
+                                        .await;
+                                }
+                                _ => {
+                                    let root_l1 = root.clone();
+                                    let completed = completed.clone();
+                                    let root_clone_inner = root.clone();
+                                    let _result = root_clone_inner
+                                        .with_dispatcher(Dispatchers::io(), async move {
+                                            let completed = completed.clone();
+                                            let _result = root_l1
+                                                .with_dispatcher(Dispatchers::io(), async move {
+                                                    sleep(Duration::from_secs(10)).await;
+                                                    completed.fetch_add(1, Ordering::SeqCst);
+                                                })
+                                                .await;
+                                        })
+                                        .await;
+                                }
                             }
-                        }
-                    }).await;
+                        })
+                        .await;
                 })
             });
 
@@ -327,7 +399,11 @@ async fn test_fan_out_cancellation() {
     job.join().await;
 
     // None should have completed
-    assert_eq!(completed.load(Ordering::SeqCst), 0, "No children should complete");
+    assert_eq!(
+        completed.load(Ordering::SeqCst),
+        0,
+        "No children should complete"
+    );
 }
 
 /// Test time-controlled cancellation
@@ -364,8 +440,16 @@ async fn test_time_controlled_cancellation() {
 
     let count = counter.load(Ordering::SeqCst);
     // Should have stopped around 25 iterations
-    assert!(count < 100, "Should not complete all iterations, got {}", count);
-    assert!(count >= 20, "Should have completed some iterations, got {}", count);
+    assert!(
+        count < 100,
+        "Should not complete all iterations, got {}",
+        count
+    );
+    assert!(
+        count >= 20,
+        "Should have completed some iterations, got {}",
+        count
+    );
 }
 
 /// Test selective cancellation in complex tree
@@ -384,30 +468,36 @@ async fn test_selective_branch_cancellation() {
     let root_clone_a = Arc::clone(&root);
     let flags_a = Arc::clone(&flags);
     let job_a = root.launch(async move {
-        let _result = root_clone_a.with_dispatcher(Dispatchers::io(), async move {
-            sleep(Duration::from_secs(10)).await;
-            flags_a[0].store(true, Ordering::SeqCst);
-        }).await;
+        let _result = root_clone_a
+            .with_dispatcher(Dispatchers::io(), async move {
+                sleep(Duration::from_secs(10)).await;
+                flags_a[0].store(true, Ordering::SeqCst);
+            })
+            .await;
     });
 
     // Branch B - will complete
     let root_clone_b = Arc::clone(&root);
     let flags_b = Arc::clone(&flags);
     let job_b = root.launch(async move {
-        let _result = root_clone_b.with_dispatcher(Dispatchers::io(), async move {
-            sleep(Duration::from_millis(50)).await;
-            flags_b[1].store(true, Ordering::SeqCst);
-        }).await;
+        let _result = root_clone_b
+            .with_dispatcher(Dispatchers::io(), async move {
+                sleep(Duration::from_millis(50)).await;
+                flags_b[1].store(true, Ordering::SeqCst);
+            })
+            .await;
     });
 
     // Branch C - will be cancelled
     let root_clone_c = Arc::clone(&root);
     let flags_c = Arc::clone(&flags);
     let job_c = root.launch(async move {
-        let _result = root_clone_c.with_dispatcher(Dispatchers::io(), async move {
-            sleep(Duration::from_secs(10)).await;
-            flags_c[2].store(true, Ordering::SeqCst);
-        }).await;
+        let _result = root_clone_c
+            .with_dispatcher(Dispatchers::io(), async move {
+                sleep(Duration::from_secs(10)).await;
+                flags_c[2].store(true, Ordering::SeqCst);
+            })
+            .await;
     });
 
     advance(Duration::from_millis(10)).await;
@@ -424,7 +514,13 @@ async fn test_selective_branch_cancellation() {
     job_c.join().await;
 
     // Only Branch B should complete
-    assert!(!flags[0].load(Ordering::SeqCst), "Branch A should be cancelled");
+    assert!(
+        !flags[0].load(Ordering::SeqCst),
+        "Branch A should be cancelled"
+    );
     assert!(flags[1].load(Ordering::SeqCst), "Branch B should complete");
-    assert!(!flags[2].load(Ordering::SeqCst), "Branch C should be cancelled");
+    assert!(
+        !flags[2].load(Ordering::SeqCst),
+        "Branch C should be cancelled"
+    );
 }

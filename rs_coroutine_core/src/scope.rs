@@ -1,8 +1,8 @@
 use crate::executor::Dispatcher;
 use crate::job::{CancelToken, JobHandle};
 use std::future::Future;
-use std::sync::Arc;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::sync::oneshot;
 

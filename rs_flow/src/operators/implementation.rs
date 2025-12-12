@@ -8,7 +8,9 @@ use tokio::sync::mpsc;
 /// Returns true if cancelled, false otherwise or if not in a scope
 fn is_scope_cancelled() -> bool {
     use crate::CURRENT_SCOPE;
-    CURRENT_SCOPE.try_with(|scope| scope.is_cancelled()).unwrap_or(false)
+    CURRENT_SCOPE
+        .try_with(|scope| scope.is_cancelled())
+        .unwrap_or(false)
 }
 
 impl<T> FlowExt<T> for Flow<T>
