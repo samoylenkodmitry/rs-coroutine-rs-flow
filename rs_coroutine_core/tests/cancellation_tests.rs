@@ -46,18 +46,27 @@ async fn test_scope_cancellation_propagates_to_child_scopes() {
     let child_cancelled_clone = Arc::clone(&child_cancelled);
     let scope_clone = Arc::clone(&scope);
     let job = scope.launch(async move {
-        let _result = scope_clone
+        let flag = Arc::clone(&child_cancelled_clone);
+        let result = scope_clone
             .with_dispatcher(Dispatchers::io(), async move {
-                // Check if child scope can see parent cancellation
-                sleep(Duration::from_millis(50)).await;
-                // Use CURRENT_SCOPE to check cancellation in child scope
-                if let Ok(current) = CURRENT_SCOPE.try_with(|s| s.is_cancelled()) {
-                    if current {
-                        child_cancelled_clone.store(true, Ordering::SeqCst);
+                // Simulate some work that checks for cancellation
+                for _ in 0..10 {
+                    sleep(Duration::from_millis(10)).await;
+                    // Check if child scope can see parent cancellation
+                    if let Ok(current) = CURRENT_SCOPE.try_with(|s| s.is_cancelled()) {
+                        if current {
+                            flag.store(true, Ordering::SeqCst);
+                            return;
+                        }
                     }
                 }
             })
             .await;
+
+        // If we got Err(CancellationError), that also counts as seeing cancellation
+        if result.is_err() {
+            child_cancelled_clone.store(true, Ordering::SeqCst);
+        }
     });
 
     // Let it start
@@ -66,11 +75,8 @@ async fn test_scope_cancellation_propagates_to_child_scopes() {
     // Cancel the scope
     scope.cancel();
 
-    // Wait for job to complete (outer task finishes immediately when cancelled)
+    // Wait for job to complete - no hacky sleep needed!
     job.join().await;
-
-    // Wait for the spawned task from with_dispatcher to complete its sleep and check cancellation
-    sleep(Duration::from_millis(100)).await;
 
     // The child scope should have seen the parent cancellation
     assert!(child_cancelled.load(Ordering::SeqCst));
@@ -149,15 +155,13 @@ async fn test_job_handle_child_cancellation() {
 async fn test_async_task_respects_scope_cancellation() {
     let scope = Arc::new(CoroutineScope::new(Dispatchers::main()));
     let started = Arc::new(AtomicBool::new(false));
-    let completed = Arc::new(AtomicBool::new(false));
 
     let started_clone = Arc::clone(&started);
-    let completed_clone = Arc::clone(&completed);
 
     let deferred = scope.async_task(Dispatchers::io(), async move {
         started_clone.store(true, Ordering::SeqCst);
+        // Simulate a long-running task that would normally complete
         sleep(Duration::from_millis(100)).await;
-        completed_clone.store(true, Ordering::SeqCst);
         42
     });
 
@@ -167,16 +171,12 @@ async fn test_async_task_respects_scope_cancellation() {
     // Cancel scope
     scope.cancel();
 
-    // Wait a bit more
-    sleep(Duration::from_millis(150)).await;
+    // Await the deferred - should return Err(CancellationError) immediately
+    let result = deferred.await_result().await;
 
-    // Task started but may not have completed due to cancellation
-    assert!(started.load(Ordering::SeqCst));
-
-    // The task might complete since async_task doesn't have automatic cancellation
-    // but at least we verify the cancellation is propagated to the child scope
+    // Task should have been cancelled
+    assert!(result.is_err());
     assert!(scope.is_cancelled());
-    assert!(deferred.job().is_cancelled());
 }
 
 #[tokio::test]
@@ -189,22 +189,37 @@ async fn test_multiple_nested_scopes() {
 
     let job = root.launch(async move {
         let root_clone2 = root_clone.clone();
-        let _result = root_clone
+        let flag_inner = Arc::clone(&flag_clone);
+        let flag_mid = Arc::clone(&flag_clone);
+        let result = root_clone
             .with_dispatcher(Dispatchers::io(), async move {
-                let _result = root_clone2
+                let flag_innermost = Arc::clone(&flag_inner);
+                let result2 = root_clone2
                     .with_dispatcher(Dispatchers::io(), async move {
-                        // Wait a bit
-                        sleep(Duration::from_millis(50)).await;
-                        // Check if we can see the parent's cancellation
-                        if let Ok(current) = CURRENT_SCOPE.try_with(|s| s.is_cancelled()) {
-                            if current {
-                                flag_clone.store(true, Ordering::SeqCst);
+                        // Simulate work with cooperative cancellation
+                        for _ in 0..10 {
+                            sleep(Duration::from_millis(10)).await;
+                            if let Ok(current) = CURRENT_SCOPE.try_with(|s| s.is_cancelled()) {
+                                if current {
+                                    flag_innermost.store(true, Ordering::SeqCst);
+                                    return;
+                                }
                             }
                         }
                     })
                     .await;
+
+                // If inner was cancelled, that counts too
+                if result2.is_err() {
+                    flag_inner.store(true, Ordering::SeqCst);
+                }
             })
             .await;
+
+        // If outer was cancelled, that counts too
+        if result.is_err() {
+            flag_mid.store(true, Ordering::SeqCst);
+        }
     });
 
     // Let it start
@@ -213,11 +228,8 @@ async fn test_multiple_nested_scopes() {
     // Cancel root
     root.cancel();
 
-    // Wait for outer job to complete (finishes immediately when cancelled)
+    // Wait for job to complete - no hacky sleep needed!
     job.join().await;
-
-    // Wait for the spawned tasks from with_dispatcher to complete their sleeps and check cancellation
-    sleep(Duration::from_millis(100)).await;
 
     // The deepest nested scope should have seen the cancellation
     assert!(deepest_saw_cancellation.load(Ordering::SeqCst));

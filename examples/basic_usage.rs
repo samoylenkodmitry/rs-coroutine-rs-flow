@@ -67,7 +67,8 @@ async fn example_with_dispatcher() {
                 println!("Fetching user on IO dispatcher...");
                 fetch_user_from_api().await
             })
-            .await;
+            .await
+            .expect("Task should not be cancelled");
 
         println!(
             "Back on main dispatcher with user: {} ({})",
@@ -102,7 +103,11 @@ async fn example_parallel_work() {
 
         let (result1, result2) = futures::join!(task1.await_result(), task2.await_result());
 
-        println!("Results: {} and {}", result1, result2);
+        println!(
+            "Results: {} and {}",
+            result1.expect("Task 1 should not be cancelled"),
+            result2.expect("Task 2 should not be cancelled")
+        );
     });
 
     job.join().await;

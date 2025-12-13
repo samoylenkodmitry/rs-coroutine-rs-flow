@@ -60,7 +60,14 @@ impl CoroutineScope {
     }
 
     /// Switch to a different dispatcher for the given future
-    pub async fn with_dispatcher<F, T>(&self, dispatcher: Dispatcher, fut: F) -> T
+    ///
+    /// This is equivalent to Kotlin's `withContext(dispatcher) { ... }`.
+    /// If the scope is cancelled while executing, returns `Err(CancellationError)`.
+    pub async fn with_dispatcher<F, T>(
+        &self,
+        dispatcher: Dispatcher,
+        fut: F,
+    ) -> Result<T, CancellationError>
     where
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
@@ -71,18 +78,33 @@ impl CoroutineScope {
             job: self.job.new_child(),
             cancel_token: self.cancel_token.child(),
         });
+        let cancel_token = child_scope.cancel_token.clone();
+        let job = child_scope.job.clone();
+
         dispatcher.spawn(async move {
-            // Don't use tokio::select! here - let the future run to completion
-            // so it can cooperatively check for cancellation and do cleanup.
-            // Cancellation is propagated via the hierarchical cancel_token.
-            let res = CURRENT_SCOPE.scope(child_scope, fut).await;
-            let _ = tx.send(res);
+            // Race the future against cancellation (structured concurrency)
+            let result = tokio::select! {
+                res = CURRENT_SCOPE.scope(child_scope, fut) => Some(res),
+                _ = cancel_token.cancelled() => None,
+            };
+
+            if let Some(res) = result {
+                let _ = tx.send(res);
+            }
+            job.complete();
         });
 
-        rx.await.expect("dispatcher dropped future")
+        // Also race on the receiving side - if parent is cancelled, stop waiting
+        tokio::select! {
+            res = rx => res.map_err(|_| CancellationError),
+            _ = self.cancel_token.cancelled() => Err(CancellationError),
+        }
     }
 
     /// Async task that returns a Deferred
+    ///
+    /// This is equivalent to Kotlin's `async(dispatcher) { ... }`.
+    /// The returned Deferred will complete with `Err(CancellationError)` if cancelled.
     pub fn async_task<F, T>(&self, dispatcher: Dispatcher, fut: F) -> Deferred<T>
     where
         F: Future<Output = T> + Send + 'static,
@@ -94,17 +116,28 @@ impl CoroutineScope {
             job: self.job.new_child(),
             cancel_token: self.cancel_token.child(),
         });
+        let cancel_token = child_scope.cancel_token.clone();
         let job = child_scope.job.clone();
+        let job_for_spawn = job.clone();
 
         dispatcher.spawn(async move {
-            // Don't use tokio::select! here - let the future run to completion
-            // so it can cooperatively check for cancellation and do cleanup.
-            // Cancellation is propagated via the hierarchical cancel_token.
-            let res = CURRENT_SCOPE.scope(child_scope, fut).await;
-            let _ = tx.send(res);
+            // Race the future against cancellation (structured concurrency)
+            let result = tokio::select! {
+                res = CURRENT_SCOPE.scope(child_scope, fut) => Some(res),
+                _ = cancel_token.cancelled() => None,
+            };
+
+            if let Some(res) = result {
+                let _ = tx.send(res);
+            }
+            job_for_spawn.complete();
         });
 
-        Deferred { rx, job }
+        Deferred {
+            rx,
+            job,
+            parent_cancel_token: self.cancel_token.clone(),
+        }
     }
 
     /// Cancel this scope
@@ -123,12 +156,19 @@ impl CoroutineScope {
 pub struct Deferred<T> {
     rx: oneshot::Receiver<T>,
     job: JobHandle,
+    parent_cancel_token: CancelToken,
 }
 
 impl<T> Deferred<T> {
     /// Await the deferred value
-    pub async fn await_result(self) -> T {
-        self.rx.await.expect("task dropped")
+    ///
+    /// Returns `Err(CancellationError)` if the task or parent scope is cancelled.
+    pub async fn await_result(self) -> Result<T, CancellationError> {
+        // Race receiving the result against parent cancellation
+        tokio::select! {
+            res = self.rx => res.map_err(|_| CancellationError),
+            _ = self.parent_cancel_token.cancelled() => Err(CancellationError),
+        }
     }
 
     /// Get the job handle
