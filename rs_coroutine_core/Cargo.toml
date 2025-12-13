@@ -13,5 +13,10 @@ tokio = { workspace = true }
 futures = { workspace = true }
 pin-project = { workspace = true }
 
+[features]
+# Test utilities for writing coroutine tests with virtual time control
+# Similar to Kotlin's TestScope
+test-utils = []
+
 [lib]
 proc-macro = false

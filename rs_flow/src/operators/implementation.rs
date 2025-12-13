@@ -190,6 +190,8 @@ where
         F: Fn(T) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Flow<U>> + Send + 'static,
     {
+        use crate::{JobHandle, CURRENT_SCOPE};
+
         let f = Arc::new(f);
         Flow::new(move |collector| {
             let upstream = self.clone();
@@ -197,41 +199,46 @@ where
             async move {
                 let (tx, mut rx) = mpsc::channel::<Flow<U>>(1);
 
-                let producer = tokio::spawn({
-                    let f = Arc::clone(&f);
-                    async move {
-                        upstream
-                            .collect(move |value| {
-                                let f = Arc::clone(&f);
-                                let tx = tx.clone();
-                                async move {
-                                    let flow = f(value).await;
-                                    let _ = tx.send(flow).await;
-                                }
-                            })
-                            .await;
-                    }
+                // Use structured concurrency instead of tokio::spawn
+                let producer = CURRENT_SCOPE.with(|scope| {
+                    scope.launch({
+                        let f = Arc::clone(&f);
+                        async move {
+                            upstream
+                                .collect(move |value| {
+                                    let f = Arc::clone(&f);
+                                    let tx = tx.clone();
+                                    async move {
+                                        let flow = f(value).await;
+                                        let _ = tx.send(flow).await;
+                                    }
+                                })
+                                .await;
+                        }
+                    })
                 });
 
-                let mut current_collector: Option<tokio::task::JoinHandle<()>> = None;
+                let mut current_collector: Option<JobHandle> = None;
 
                 while let Some(inner_flow) = rx.recv().await {
                     // Cancel the previous inner flow collection
                     if let Some(handle) = current_collector.take() {
-                        handle.abort();
+                        handle.cancel();
                     }
 
-                    // Start collecting the new inner flow
+                    // Start collecting the new inner flow using structured concurrency
                     let collector = collector.clone();
-                    let handle = tokio::spawn(async move {
-                        inner_flow
-                            .collect(move |value| {
-                                let collector = collector.clone();
-                                async move {
-                                    collector.emit(value).await;
-                                }
-                            })
-                            .await;
+                    let handle = CURRENT_SCOPE.with(|scope| {
+                        scope.launch(async move {
+                            inner_flow
+                                .collect(move |value| {
+                                    let collector = collector.clone();
+                                    async move {
+                                        collector.emit(value).await;
+                                    }
+                                })
+                                .await;
+                        })
                     });
 
                     current_collector = Some(handle);
@@ -239,10 +246,10 @@ where
 
                 // Wait for the last inner flow to complete
                 if let Some(handle) = current_collector {
-                    let _ = handle.await;
+                    handle.join().await;
                 }
 
-                let _ = producer.await;
+                producer.join().await;
             }
         })
     }

@@ -2,45 +2,54 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::Notify;
 
+/// Inner state of a CancelToken
+struct CancelTokenInner {
+    cancelled: AtomicBool,
+    notify: Notify,
+    parent: Option<Arc<CancelTokenInner>>,
+}
+
 /// A cancellation token for cooperative cancellation
 ///
 /// Supports hierarchical cancellation: when a parent token is cancelled,
 /// all child tokens are automatically considered cancelled as well.
 /// Children can also be cancelled independently without affecting the parent.
+///
+/// Optimized to avoid recursive heap allocation by wrapping Arc<Inner>.
 #[derive(Clone)]
 pub struct CancelToken {
-    cancelled: Arc<AtomicBool>,
-    notify: Arc<Notify>,
-    parent: Option<Arc<CancelToken>>,
+    inner: Arc<CancelTokenInner>,
 }
 
 impl CancelToken {
     /// Create a new root CancelToken
     pub fn new() -> Self {
         Self {
-            cancelled: Arc::new(AtomicBool::new(false)),
-            notify: Arc::new(Notify::new()),
-            parent: None,
+            inner: Arc::new(CancelTokenInner {
+                cancelled: AtomicBool::new(false),
+                notify: Notify::new(),
+                parent: None,
+            }),
         }
     }
 
     /// Cancel this token
     pub fn cancel(&self) {
-        self.cancelled.store(true, Ordering::SeqCst);
-        self.notify.notify_waiters();
+        self.inner.cancelled.store(true, Ordering::SeqCst);
+        self.inner.notify.notify_waiters();
     }
 
     /// Check if this token is cancelled
     /// This checks both this token and all parent tokens in the hierarchy
+    /// Uses iterative approach to avoid stack overflow on deep nesting
     pub fn is_cancelled(&self) -> bool {
-        // Check our own cancellation first
-        if self.cancelled.load(Ordering::SeqCst) {
-            return true;
-        }
+        let mut current: Option<&Arc<CancelTokenInner>> = Some(&self.inner);
 
-        // Check parent cancellation (recursively walks up the hierarchy)
-        if let Some(parent) = &self.parent {
-            return parent.is_cancelled();
+        while let Some(inner) = current {
+            if inner.cancelled.load(Ordering::SeqCst) {
+                return true;
+            }
+            current = inner.parent.as_ref();
         }
 
         false
@@ -55,14 +64,17 @@ impl CancelToken {
 
         // We need to wait on both our own notify and parent's
         // Create a future that completes when either this token or parent is cancelled
-        let own_notified = self.notify.notified();
+        let own_notified = self.inner.notify.notified();
 
-        if let Some(parent) = &self.parent {
-            // Box the recursive call to avoid infinite size
-            let parent_cancelled = Box::pin(parent.cancelled());
+        if let Some(parent_inner) = &self.inner.parent {
+            // Create parent token to await
+            let parent = CancelToken {
+                inner: Arc::clone(parent_inner),
+            };
+            // Box the recursive call to avoid infinite future size
             tokio::select! {
                 _ = own_notified => {},
-                _ = parent_cancelled => {},
+                _ = Box::pin(parent.cancelled()) => {},
             }
         } else {
             own_notified.await;
@@ -74,9 +86,11 @@ impl CancelToken {
     /// but can also be cancelled independently without affecting the parent.
     pub fn child(&self) -> Self {
         Self {
-            cancelled: Arc::new(AtomicBool::new(false)),
-            notify: Arc::new(Notify::new()),
-            parent: Some(Arc::new(self.clone())),
+            inner: Arc::new(CancelTokenInner {
+                cancelled: AtomicBool::new(false),
+                notify: Notify::new(),
+                parent: Some(Arc::clone(&self.inner)),
+            }),
         }
     }
 }

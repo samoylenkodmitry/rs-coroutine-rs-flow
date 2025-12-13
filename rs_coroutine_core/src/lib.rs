@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 #![deny(warnings)]
 
 pub mod executor;
@@ -5,11 +6,7 @@ pub mod job;
 pub mod scope;
 pub mod suspending;
 
-#[cfg(test)]
-pub mod test_utils;
-
-// Also make test_utils available for integration tests
-#[cfg(not(test))]
+#[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
 
 pub use executor::{Dispatcher, Dispatchers, Executor, TokioExecutor};

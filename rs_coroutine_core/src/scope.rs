@@ -1,9 +1,7 @@
 use crate::executor::Dispatcher;
 use crate::job::{CancelToken, JobHandle};
 use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 use tokio::sync::oneshot;
 
 tokio::task_local! {
@@ -40,16 +38,19 @@ impl CoroutineScope {
         let cancel_token = self.cancel_token.clone();
 
         let job_clone = job.clone();
-        let cancel_token_clone = cancel_token.clone();
         dispatcher.spawn(async move {
             CURRENT_SCOPE
                 .scope(scope.clone(), async move {
-                    // Wrap the future with cancellation checking
-                    let cancellable = CancellableWrap {
-                        future: fut,
-                        cancel_token: cancel_token_clone,
-                    };
-                    cancellable.await;
+                    // Race the future against cancellation
+                    // This properly wakes on cancel, unlike poll-based checking
+                    tokio::select! {
+                        _ = cancel_token.cancelled() => {
+                            // Cancelled before completion
+                        }
+                        _ = fut => {
+                            // Completed normally
+                        }
+                    }
                     job_clone.complete();
                 })
                 .await;
@@ -70,8 +71,10 @@ impl CoroutineScope {
             job: self.job.new_child(),
             cancel_token: self.cancel_token.child(),
         });
-
         dispatcher.spawn(async move {
+            // Don't use tokio::select! here - let the future run to completion
+            // so it can cooperatively check for cancellation and do cleanup.
+            // Cancellation is propagated via the hierarchical cancel_token.
             let res = CURRENT_SCOPE.scope(child_scope, fut).await;
             let _ = tx.send(res);
         });
@@ -94,6 +97,9 @@ impl CoroutineScope {
         let job = child_scope.job.clone();
 
         dispatcher.spawn(async move {
+            // Don't use tokio::select! here - let the future run to completion
+            // so it can cooperatively check for cancellation and do cleanup.
+            // Cancellation is propagated via the hierarchical cancel_token.
             let res = CURRENT_SCOPE.scope(child_scope, fut).await;
             let _ = tx.send(res);
         });
@@ -147,14 +153,14 @@ pub fn get_current_scope() -> Arc<CoroutineScope> {
 
 /// Check if the current scope is cancelled and return an error if so
 /// This can be used in async functions to check for cancellation
+///
+/// Returns Ok(()) if not in a scope context (instead of panicking)
 pub fn check_cancellation() -> Result<(), CancellationError> {
-    CURRENT_SCOPE.with(|scope| {
-        if scope.is_cancelled() {
-            Err(CancellationError)
-        } else {
-            Ok(())
-        }
-    })
+    match CURRENT_SCOPE.try_with(|scope| scope.is_cancelled()) {
+        Ok(true) => Err(CancellationError),
+        Ok(false) => Ok(()),
+        Err(_) => Ok(()), // Not in a scope context - treat as not cancelled
+    }
 }
 
 /// Error returned when a coroutine is cancelled
@@ -168,31 +174,6 @@ impl std::fmt::Display for CancellationError {
 }
 
 impl std::error::Error for CancellationError {}
-
-/// A future wrapper that checks for cancellation and yields the error if cancelled
-/// This allows cooperative cancellation at await points
-struct CancellableWrap<F> {
-    future: F,
-    cancel_token: CancelToken,
-}
-
-impl<F> Future for CancellableWrap<F>
-where
-    F: Future<Output = ()>,
-{
-    type Output = ();
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // Check cancellation before polling the inner future
-        if self.cancel_token.is_cancelled() {
-            return Poll::Ready(());
-        }
-
-        // Safety: We're not moving the inner future
-        let future = unsafe { self.map_unchecked_mut(|s| &mut s.future) };
-        future.poll(cx)
-    }
-}
 
 /// Yield control and check for cancellation
 /// This is similar to Kotlin's yield() function
@@ -251,6 +232,6 @@ macro_rules! ensure_active {
 macro_rules! yield_and_check {
     () => {
         $crate::yield_now().await;
-        check_cancelled!();
+        $crate::check_cancelled!();
     };
 }

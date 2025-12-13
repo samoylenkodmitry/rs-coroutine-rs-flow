@@ -66,8 +66,11 @@ async fn test_scope_cancellation_propagates_to_child_scopes() {
     // Cancel the scope
     scope.cancel();
 
-    // Wait for job
+    // Wait for job to complete (outer task finishes immediately when cancelled)
     job.join().await;
+
+    // Wait for the spawned task from with_dispatcher to complete its sleep and check cancellation
+    sleep(Duration::from_millis(100)).await;
 
     // The child scope should have seen the parent cancellation
     assert!(child_cancelled.load(Ordering::SeqCst));
@@ -210,8 +213,11 @@ async fn test_multiple_nested_scopes() {
     // Cancel root
     root.cancel();
 
-    // Wait
+    // Wait for outer job to complete (finishes immediately when cancelled)
     job.join().await;
+
+    // Wait for the spawned tasks from with_dispatcher to complete their sleeps and check cancellation
+    sleep(Duration::from_millis(100)).await;
 
     // The deepest nested scope should have seen the cancellation
     assert!(deepest_saw_cancellation.load(Ordering::SeqCst));
