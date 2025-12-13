@@ -10,8 +10,12 @@ readme = "README.md"
 
 [dependencies]
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 futures = { workspace = true }
 pin-project = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 
 [features]
 # Test utilities for writing coroutine tests with virtual time control
