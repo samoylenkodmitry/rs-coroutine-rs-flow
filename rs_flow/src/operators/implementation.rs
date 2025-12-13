@@ -221,9 +221,11 @@ where
                 let mut current_collector: Option<JobHandle> = None;
 
                 while let Some(inner_flow) = rx.recv().await {
-                    // Cancel the previous inner flow collection
+                    // Cancel the previous inner flow collection and WAIT for it to finish
+                    // This prevents overlapping inner flow collections (semantic correctness)
                     if let Some(handle) = current_collector.take() {
                         handle.cancel();
+                        handle.join().await; // CRITICAL: wait for cancellation to complete
                     }
 
                     // Start collecting the new inner flow using structured concurrency

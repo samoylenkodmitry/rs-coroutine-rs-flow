@@ -34,24 +34,24 @@ async fn test_deeply_nested_cancellation() {
         let root_1 = Arc::clone(&root_clone);
         let c1 = Arc::clone(&counters_clone);
         let level1_result = root_clone
-            .with_dispatcher(Dispatchers::io(), async move {
+            .try_with_dispatcher(Dispatchers::io(), async move {
                 c1[1].fetch_add(1, Ordering::SeqCst);
 
                 let root_2 = Arc::clone(&root_1);
                 let c2 = Arc::clone(&c1);
                 let level2_result = root_1
-                    .with_dispatcher(Dispatchers::io(), async move {
+                    .try_with_dispatcher(Dispatchers::io(), async move {
                         c2[2].fetch_add(1, Ordering::SeqCst);
 
                         let root_3 = Arc::clone(&root_2);
                         let c3 = Arc::clone(&c2);
                         let level3_result = root_2
-                            .with_dispatcher(Dispatchers::io(), async move {
+                            .try_with_dispatcher(Dispatchers::io(), async move {
                                 c3[3].fetch_add(1, Ordering::SeqCst);
 
                                 let c4 = Arc::clone(&c3);
                                 let level4_result = root_3
-                                    .with_dispatcher(Dispatchers::io(), async move {
+                                    .try_with_dispatcher(Dispatchers::io(), async move {
                                         c4[4].fetch_add(1, Ordering::SeqCst);
 
                                         // Deepest level - simulate work with cooperative cancellation
@@ -159,7 +159,7 @@ async fn test_diamond_dependency_cancellation() {
             // B spawns D
             let visited_d1 = Arc::clone(&visited_b);
             root_b
-                .with_dispatcher(Dispatchers::io(), async move {
+                .try_with_dispatcher(Dispatchers::io(), async move {
                     visited_d1[3].store(true, Ordering::SeqCst);
 
                     // D does work
@@ -287,21 +287,21 @@ async fn test_dispatcher_hopping_cancellation() {
         hops_clone.fetch_add(1, Ordering::SeqCst); // Hop 0: main
 
         let result1 = root_clone
-            .with_dispatcher(Dispatchers::io(), async move {
+            .try_with_dispatcher(Dispatchers::io(), async move {
                 let root2 = Arc::clone(&root1);
                 hops_clone.fetch_add(1, Ordering::SeqCst); // Hop 1: io
 
                 root1
-                    .with_dispatcher(Dispatchers::main(), async move {
+                    .try_with_dispatcher(Dispatchers::main(), async move {
                         let root3 = Arc::clone(&root2);
                         hops_clone.fetch_add(1, Ordering::SeqCst); // Hop 2: main
 
                         root2
-                            .with_dispatcher(Dispatchers::io(), async move {
+                            .try_with_dispatcher(Dispatchers::io(), async move {
                                 hops_clone.fetch_add(1, Ordering::SeqCst); // Hop 3: io
 
                                 root3
-                                    .with_dispatcher(Dispatchers::main(), async move {
+                                    .try_with_dispatcher(Dispatchers::main(), async move {
                                         hops_clone.fetch_add(1, Ordering::SeqCst); // Hop 4: main
 
                                         // Do work on 5th dispatcher

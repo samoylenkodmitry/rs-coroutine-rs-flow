@@ -48,7 +48,7 @@ async fn test_scope_cancellation_propagates_to_child_scopes() {
     let job = scope.launch(async move {
         let flag = Arc::clone(&child_cancelled_clone);
         let result = scope_clone
-            .with_dispatcher(Dispatchers::io(), async move {
+            .try_with_dispatcher(Dispatchers::io(), async move {
                 // Simulate some work that checks for cancellation
                 for _ in 0..10 {
                     sleep(Duration::from_millis(10)).await;
@@ -192,10 +192,10 @@ async fn test_multiple_nested_scopes() {
         let flag_inner = Arc::clone(&flag_clone);
         let flag_mid = Arc::clone(&flag_clone);
         let result = root_clone
-            .with_dispatcher(Dispatchers::io(), async move {
+            .try_with_dispatcher(Dispatchers::io(), async move {
                 let flag_innermost = Arc::clone(&flag_inner);
                 let result2 = root_clone2
-                    .with_dispatcher(Dispatchers::io(), async move {
+                    .try_with_dispatcher(Dispatchers::io(), async move {
                         // Simulate work with cooperative cancellation
                         for _ in 0..10 {
                             sleep(Duration::from_millis(10)).await;

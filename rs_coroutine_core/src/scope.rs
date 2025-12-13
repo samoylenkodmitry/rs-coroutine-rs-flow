@@ -1,3 +1,4 @@
+use crate::error::CancellationError;
 use crate::executor::Dispatcher;
 use crate::job::{CancelToken, JobHandle};
 use std::future::Future;
@@ -6,6 +7,26 @@ use tokio::sync::oneshot;
 
 tokio::task_local! {
     pub static CURRENT_SCOPE: Arc<CoroutineScope>;
+}
+
+/// Guard that ensures job.complete() is called even on panic
+/// This is critical for correctness - without it, panics in spawned tasks
+/// would leave the job in an incomplete state forever.
+struct JobCompletionGuard {
+    job: JobHandle,
+}
+
+impl JobCompletionGuard {
+    fn new(job: JobHandle) -> Self {
+        Self { job }
+    }
+}
+
+impl Drop for JobCompletionGuard {
+    fn drop(&mut self) {
+        // Always mark job as complete, even on panic unwind
+        self.job.complete();
+    }
 }
 
 /// A coroutine scope manages the lifecycle of coroutines
@@ -39,6 +60,9 @@ impl CoroutineScope {
 
         let job_clone = job.clone();
         dispatcher.spawn(async move {
+            // Create guard FIRST - ensures job.complete() is called even on panic
+            let _guard = JobCompletionGuard::new(job_clone);
+
             CURRENT_SCOPE
                 .scope(scope.clone(), async move {
                     // Race the future against cancellation
@@ -51,9 +75,9 @@ impl CoroutineScope {
                             // Completed normally
                         }
                     }
-                    job_clone.complete();
                 })
                 .await;
+            // Guard's Drop will call job.complete() here
         });
 
         job
@@ -63,7 +87,10 @@ impl CoroutineScope {
     ///
     /// This is equivalent to Kotlin's `withContext(dispatcher) { ... }`.
     /// If the scope is cancelled while executing, returns `Err(CancellationError)`.
-    pub async fn with_dispatcher<F, T>(
+    ///
+    /// This is the recommended safe API. For backwards compatibility,
+    /// see `with_dispatcher_unchecked` which panics on cancellation.
+    pub async fn try_with_dispatcher<F, T>(
         &self,
         dispatcher: Dispatcher,
         fut: F,
@@ -82,6 +109,9 @@ impl CoroutineScope {
         let job = child_scope.job.clone();
 
         dispatcher.spawn(async move {
+            // Create guard FIRST - ensures job.complete() is called even on panic
+            let _guard = JobCompletionGuard::new(job);
+
             // Race the future against cancellation (structured concurrency)
             let result = tokio::select! {
                 res = CURRENT_SCOPE.scope(child_scope, fut) => Some(res),
@@ -91,7 +121,7 @@ impl CoroutineScope {
             if let Some(res) = result {
                 let _ = tx.send(res);
             }
-            job.complete();
+            // Guard's Drop will call job.complete() here
         });
 
         // Also race on the receiving side - if parent is cancelled, stop waiting
@@ -99,6 +129,30 @@ impl CoroutineScope {
             res = rx => res.map_err(|_| CancellationError),
             _ = self.cancel_token.cancelled() => Err(CancellationError),
         }
+    }
+
+    /// Switch to a different dispatcher for the given future (unchecked version)
+    ///
+    /// **Panics** if the scope is cancelled while executing.
+    ///
+    /// This method is provided for backwards compatibility and quick prototyping.
+    /// For production code, prefer `try_with_dispatcher` which returns `Result`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the scope or parent scope is cancelled during execution.
+    #[deprecated(
+        since = "0.2.0",
+        note = "Use try_with_dispatcher instead for proper error handling"
+    )]
+    pub async fn with_dispatcher<F, T>(&self, dispatcher: Dispatcher, fut: F) -> T
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        self.try_with_dispatcher(dispatcher, fut)
+            .await
+            .expect("Scope was cancelled during with_dispatcher - use try_with_dispatcher for proper error handling")
     }
 
     /// Async task that returns a Deferred
@@ -121,6 +175,9 @@ impl CoroutineScope {
         let job_for_spawn = job.clone();
 
         dispatcher.spawn(async move {
+            // Create guard FIRST - ensures job.complete() is called even on panic
+            let _guard = JobCompletionGuard::new(job_for_spawn);
+
             // Race the future against cancellation (structured concurrency)
             let result = tokio::select! {
                 res = CURRENT_SCOPE.scope(child_scope, fut) => Some(res),
@@ -130,7 +187,7 @@ impl CoroutineScope {
             if let Some(res) = result {
                 let _ = tx.send(res);
             }
-            job_for_spawn.complete();
+            // Guard's Drop will call job.complete() here
         });
 
         Deferred {
@@ -163,12 +220,34 @@ impl<T> Deferred<T> {
     /// Await the deferred value
     ///
     /// Returns `Err(CancellationError)` if the task or parent scope is cancelled.
+    ///
+    /// This is the recommended safe API.
     pub async fn await_result(self) -> Result<T, CancellationError> {
         // Race receiving the result against parent cancellation
         tokio::select! {
             res = self.rx => res.map_err(|_| CancellationError),
             _ = self.parent_cancel_token.cancelled() => Err(CancellationError),
         }
+    }
+
+    /// Await the deferred value (unchecked version)
+    ///
+    /// **Panics** if the task or parent scope is cancelled.
+    ///
+    /// This method is provided for backwards compatibility and quick prototyping.
+    /// For production code, prefer `await_result` which returns `Result`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the task or parent scope is cancelled during execution.
+    #[deprecated(
+        since = "0.2.0",
+        note = "Use await_result instead for proper error handling"
+    )]
+    pub async fn await_unchecked(self) -> T {
+        self.await_result()
+            .await
+            .expect("Deferred was cancelled - use await_result for proper error handling")
     }
 
     /// Get the job handle
@@ -203,18 +282,6 @@ pub fn check_cancellation() -> Result<(), CancellationError> {
     }
 }
 
-/// Error returned when a coroutine is cancelled
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CancellationError;
-
-impl std::fmt::Display for CancellationError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Coroutine was cancelled")
-    }
-}
-
-impl std::error::Error for CancellationError {}
-
 /// Yield control and check for cancellation
 /// This is similar to Kotlin's yield() function
 pub async fn yield_now() {
@@ -241,11 +308,25 @@ macro_rules! check_cancelled {
 /// Macro to ensure the coroutine is active, panicking with a message if cancelled
 /// Similar to Kotlin's ensureActive() with panic behavior
 ///
+/// **Deprecated:** This macro panics on cancellation, which is not idiomatic Rust.
+/// Use `check_cancellation()?` instead in functions that return `Result`.
+///
 /// # Example
 /// ```ignore
+/// // Old (panics):
 /// ensure_active!();
-/// // continues if not cancelled, panics if cancelled
+///
+/// // New (returns Result):
+/// check_cancellation()?;
 /// ```
+///
+/// # Panics
+///
+/// Panics if the coroutine is cancelled.
+#[deprecated(
+    since = "0.2.0",
+    note = "Use check_cancellation()? instead for proper error handling"
+)]
 #[macro_export]
 macro_rules! ensure_active {
     () => {
