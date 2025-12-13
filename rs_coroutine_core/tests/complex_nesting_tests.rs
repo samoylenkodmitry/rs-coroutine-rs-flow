@@ -100,11 +100,31 @@ async fn test_deeply_nested_cancellation() {
     job.join().await;
 
     // All levels should have started
-    assert_eq!(counters[0].load(Ordering::SeqCst), 1, "Level 0 should start");
-    assert_eq!(counters[1].load(Ordering::SeqCst), 1, "Level 1 should start");
-    assert_eq!(counters[2].load(Ordering::SeqCst), 1, "Level 2 should start");
-    assert_eq!(counters[3].load(Ordering::SeqCst), 1, "Level 3 should start");
-    assert_eq!(counters[4].load(Ordering::SeqCst), 1, "Level 4 should start");
+    assert_eq!(
+        counters[0].load(Ordering::SeqCst),
+        1,
+        "Level 0 should start"
+    );
+    assert_eq!(
+        counters[1].load(Ordering::SeqCst),
+        1,
+        "Level 1 should start"
+    );
+    assert_eq!(
+        counters[2].load(Ordering::SeqCst),
+        1,
+        "Level 2 should start"
+    );
+    assert_eq!(
+        counters[3].load(Ordering::SeqCst),
+        1,
+        "Level 3 should start"
+    );
+    assert_eq!(
+        counters[4].load(Ordering::SeqCst),
+        1,
+        "Level 4 should start"
+    );
 
     // Root should be cancelled
     assert!(root.is_cancelled());
@@ -238,7 +258,11 @@ async fn test_fan_out_cancellation() {
     job.join().await;
 
     // All tasks should have started
-    assert_eq!(started.load(Ordering::SeqCst), 10, "All 10 tasks should start");
+    assert_eq!(
+        started.load(Ordering::SeqCst),
+        10,
+        "All 10 tasks should start"
+    );
 
     // Most/all tasks should NOT have completed (cancelled mid-flight)
     let completed_count = completed.load(Ordering::SeqCst);
