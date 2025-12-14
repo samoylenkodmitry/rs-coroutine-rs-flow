@@ -1,9 +1,7 @@
 use crate::error::{CancellationError, TaskError};
-use crate::executor::Dispatcher;
+use crate::executor::{BoxedJoinHandle, Dispatcher};
 use crate::job::{CancelToken, JobHandle};
-use futures::FutureExt;
 use std::future::Future;
-use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use tokio::sync::oneshot;
 
@@ -112,7 +110,7 @@ impl CoroutineScope {
         let cancel_token = child_scope.cancel_token.clone();
         let job = child_scope.job.clone();
 
-        dispatcher.spawn(async move {
+        let join_handle = dispatcher.spawn(async move {
             // Create guard FIRST - ensures job.complete() is called even on panic
             let _guard = JobCompletionGuard::new(job);
 
@@ -122,46 +120,49 @@ impl CoroutineScope {
                 return;
             }
 
-            // Wrap in AssertUnwindSafe and catch panics
-            // NOTE: This requires the future to be UnwindSafe. Users must ensure their
-            // futures don't have unwind-unsafe state (like non-unwind-safe mutexes).
-            let panic_catching_future = AssertUnwindSafe(CURRENT_SCOPE.scope(child_scope, async move {
-                // Race the future against cancellation (structured concurrency)
+            // Run the future in scope, racing against cancellation
+            let result = CURRENT_SCOPE.scope(child_scope, async move {
                 // biased + cancellation-first = deterministic cancellation semantics
                 tokio::select! {
                     biased;
                     _ = cancel_token.cancelled() => Err(TaskError::Cancelled),
                     res = fut => Ok(res),
                 }
-            }))
-            .catch_unwind();
-
-            // Await and handle panic
-            let result = match panic_catching_future.await {
-                Ok(task_result) => task_result,
-                Err(panic_payload) => {
-                    // Extract panic message
-                    let panic_msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
-                        s.to_string()
-                    } else if let Some(s) = panic_payload.downcast_ref::<String>() {
-                        s.clone()
-                    } else {
-                        "panic with non-string payload".to_string()
-                    };
-                    Err(TaskError::Panicked(panic_msg))
-                }
-            };
+            }).await;
 
             let _ = tx.send(result);
             // Guard's Drop will call job.complete() here
         });
 
-        // Also race on the receiving side - if parent is cancelled, stop waiting
+        // Race between parent cancellation and task completion (including panics)
         // biased + cancellation-first = deterministic: once parent cancelled, always return Cancelled
         tokio::select! {
             biased;
             _ = self.cancel_token.cancelled() => Err(TaskError::Cancelled),
-            res = rx => res.unwrap_or(Err(TaskError::Aborted)),
+            join_result = join_handle => {
+                match join_result {
+                    Ok(()) => {
+                        // Task completed normally, get result from oneshot
+                        rx.await.unwrap_or(Err(TaskError::Aborted))
+                    }
+                    Err(join_err) if join_err.is_panic() => {
+                        // Task panicked - use JoinError to get panic info (proper Tokio idiom)
+                        let panic_payload = join_err.into_panic();
+                        let panic_msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                            s.to_string()
+                        } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                            s.clone()
+                        } else {
+                            "panic with non-string payload".to_string()
+                        };
+                        Err(TaskError::Panicked(panic_msg))
+                    }
+                    Err(_) => {
+                        // Task cancelled by runtime shutdown
+                        Err(TaskError::Aborted)
+                    }
+                }
+            }
         }
     }
 
@@ -184,7 +185,7 @@ impl CoroutineScope {
         let job = child_scope.job.clone();
         let job_for_spawn = job.clone();
 
-        dispatcher.spawn(async move {
+        let join_handle = dispatcher.spawn(async move {
             // Create guard FIRST - ensures job.complete() is called even on panic
             let _guard = JobCompletionGuard::new(job_for_spawn);
 
@@ -194,33 +195,15 @@ impl CoroutineScope {
                 return;
             }
 
-            // Wrap in AssertUnwindSafe and catch panics
-            let panic_catching_future = AssertUnwindSafe(CURRENT_SCOPE.scope(child_scope, async move {
-                // Race the future against cancellation (structured concurrency)
+            // Run the future in scope, racing against cancellation
+            let result = CURRENT_SCOPE.scope(child_scope, async move {
                 // biased + cancellation-first = deterministic cancellation semantics
                 tokio::select! {
                     biased;
                     _ = cancel_token.cancelled() => Err(TaskError::Cancelled),
                     res = fut => Ok(res),
                 }
-            }))
-            .catch_unwind();
-
-            // Await and handle panic
-            let result = match panic_catching_future.await {
-                Ok(task_result) => task_result,
-                Err(panic_payload) => {
-                    // Extract panic message
-                    let panic_msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
-                        s.to_string()
-                    } else if let Some(s) = panic_payload.downcast_ref::<String>() {
-                        s.clone()
-                    } else {
-                        "panic with non-string payload".to_string()
-                    };
-                    Err(TaskError::Panicked(panic_msg))
-                }
-            };
+            }).await;
 
             let _ = tx.send(result);
             // Guard's Drop will call job.complete() here
@@ -228,6 +211,7 @@ impl CoroutineScope {
 
         Deferred {
             rx,
+            join_handle,
             job,
             parent_cancel_token: self.cancel_token.clone(),
         }
@@ -248,6 +232,7 @@ impl CoroutineScope {
 /// A deferred value that can be awaited
 pub struct Deferred<T> {
     rx: oneshot::Receiver<Result<T, TaskError>>,
+    join_handle: BoxedJoinHandle,
     job: JobHandle,
     parent_cancel_token: CancelToken,
 }
@@ -263,12 +248,35 @@ impl<T> Deferred<T> {
     /// - `TaskError::Panicked` if the task panics
     /// - `TaskError::Aborted` if the task is dropped before completion
     pub async fn await_result(self) -> Result<T, TaskError> {
-        // Race receiving the result against parent cancellation
+        // Race between parent cancellation and task completion (including panics)
         // biased + cancellation-first = deterministic: once parent cancelled, always return Cancelled
         tokio::select! {
             biased;
             _ = self.parent_cancel_token.cancelled() => Err(TaskError::Cancelled),
-            res = self.rx => res.unwrap_or(Err(TaskError::Aborted)),
+            join_result = self.join_handle => {
+                match join_result {
+                    Ok(()) => {
+                        // Task completed normally, get result from oneshot
+                        self.rx.await.unwrap_or(Err(TaskError::Aborted))
+                    }
+                    Err(join_err) if join_err.is_panic() => {
+                        // Task panicked - use JoinError to get panic info (proper Tokio idiom)
+                        let panic_payload = join_err.into_panic();
+                        let panic_msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                            s.to_string()
+                        } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                            s.clone()
+                        } else {
+                            "panic with non-string payload".to_string()
+                        };
+                        Err(TaskError::Panicked(panic_msg))
+                    }
+                    Err(_) => {
+                        // Task cancelled by runtime shutdown
+                        Err(TaskError::Aborted)
+                    }
+                }
+            }
         }
     }
 
