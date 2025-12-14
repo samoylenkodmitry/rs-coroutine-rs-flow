@@ -42,22 +42,24 @@ pub struct TestScope {
 }
 
 impl TestScope {
-    /// Create a new TestScope with virtual time enabled
+    /// Create a new TestScope without pausing time
     ///
-    /// This automatically calls tokio::time::pause() to enable manual time control.
+    /// **Note:** This does NOT pause time automatically. Use `run_test()` for automatic
+    /// time control, or manually call `pause_time()` if needed.
     ///
     /// # Example
     /// ```
-    /// use rs_coroutine_core::test_utils::TestScope;
+    /// use rs_coroutine_core::test_utils::*;
     ///
     /// #[tokio::test]
-    /// async fn test_with_virtual_time() {
+    /// async fn test_with_manual_time_control() {
+    ///     pause_time(); // Explicit opt-in
     ///     let test_scope = TestScope::new();
     ///     // Time is now paused and can be advanced manually
+    ///     resume_time(); // Explicit cleanup
     /// }
     /// ```
     pub fn new() -> Self {
-        pause(); // Enable virtual time
         Self {
             scope: Arc::new(CoroutineScope::new(Dispatchers::main())),
             virtual_time: Arc::new(AtomicU64::new(0)),
@@ -66,7 +68,6 @@ impl TestScope {
 
     /// Create a new TestScope with a specific dispatcher
     pub fn with_dispatcher(dispatcher: Dispatcher) -> Self {
-        pause();
         Self {
             scope: Arc::new(CoroutineScope::new(dispatcher)),
             virtual_time: Arc::new(AtomicU64::new(0)),
@@ -159,16 +160,23 @@ impl TestScope {
         tokio::task::yield_now().await;
     }
 
-    /// Advance time until all pending tasks are complete
+    /// Advance time until all pending tasks are complete (best-effort)
     ///
-    /// Similar to Kotlin's `advanceUntilIdle()`.
-    /// This repeatedly advances time and runs tasks until there's nothing left to do.
+    /// **Warning:** This is a simplified implementation that advances time in fixed increments.
+    /// It may not detect true idle state and could either under-advance (leaving work pending)
+    /// or over-advance (wasting time). The max_steps parameter controls the maximum number of
+    /// 1ms increments to advance.
+    ///
+    /// For production tests, prefer explicit `advance_time_by()` with known durations.
+    ///
+    /// Similar to Kotlin's `advanceUntilIdle()`, but less sophisticated.
     ///
     /// # Example
     /// ```
     /// # use rs_coroutine_core::test_utils::*;
     /// # #[tokio::test]
     /// # async fn test() {
+    /// pause_time();
     /// let test_scope = TestScope::new();
     ///
     /// test_scope.launch(async {
@@ -181,14 +189,15 @@ impl TestScope {
     ///     println!("Task 2");
     /// });
     ///
-    /// test_scope.advance_until_idle().await;
-    /// // Both tasks have completed
+    /// test_scope.advance_time_until_idle(500).await; // Advance up to 500ms
+    /// // Both tasks have likely completed (if they fit within 500ms)
+    /// # resume_time();
     /// # }
     /// ```
-    pub async fn advance_until_idle(&self) {
-        // Advance time in small increments and check for idle
-        // This is a simplified version - production code might need more sophistication
-        for _ in 0..1000 {
+    pub async fn advance_time_until_idle(&self, max_steps: usize) {
+        // Simplified implementation: advance time in small increments
+        // A proper implementation would detect true idle state using runtime introspection
+        for _ in 0..max_steps {
             self.advance_time_by(Duration::from_millis(1)).await;
             tokio::task::yield_now().await;
         }
@@ -358,10 +367,32 @@ pub async fn delay_secs(secs: u64) {
     sleep(Duration::from_secs(secs)).await;
 }
 
-/// Run a test with automatic cleanup
+/// RAII guard that pauses time on creation and resumes on drop
+///
+/// This ensures time control is properly cleaned up even if the test panics.
+pub struct TimeControlGuard {
+    _private: (),
+}
+
+impl TimeControlGuard {
+    /// Create a new TimeControlGuard and pause time
+    pub fn new() -> Self {
+        pause();
+        Self { _private: () }
+    }
+}
+
+impl Drop for TimeControlGuard {
+    fn drop(&mut self) {
+        resume();
+    }
+}
+
+/// Run a test with automatic time control and cleanup
 ///
 /// This is similar to Kotlin's runTest { }.
-/// It creates a TestScope, runs your test code, and ensures proper cleanup.
+/// It creates a TestScope, pauses time, runs your test code, and ensures proper cleanup.
+/// Time is automatically resumed when the test completes or panics.
 ///
 /// # Example
 /// ```
@@ -384,6 +415,7 @@ where
     F: FnOnce(TestScope) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
+    let _guard = TimeControlGuard::new(); // Pauses time, resumes on drop
     let scope = TestScope::new();
     test(scope).await;
 }
