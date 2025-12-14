@@ -63,7 +63,7 @@ async fn example_with_dispatcher() {
 
         // Switch to IO dispatcher for background work
         let user = scope_clone
-            .try_with_dispatcher(Dispatchers::io(), async {
+            .with_dispatcher(Dispatchers::io(), async {
                 println!("Fetching user on IO dispatcher...");
                 fetch_user_from_api().await
             })

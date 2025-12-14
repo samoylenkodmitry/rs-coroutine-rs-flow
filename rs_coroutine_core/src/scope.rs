@@ -1,4 +1,4 @@
-use crate::error::CancellationError;
+use crate::error::{CancellationError, TaskError};
 use crate::executor::Dispatcher;
 use crate::job::{CancelToken, JobHandle};
 use std::future::Future;
@@ -86,15 +86,17 @@ impl CoroutineScope {
     /// Switch to a different dispatcher for the given future
     ///
     /// This is equivalent to Kotlin's `withContext(dispatcher) { ... }`.
-    /// If the scope is cancelled while executing, returns `Err(CancellationError)`.
     ///
-    /// This is the recommended safe API. For backwards compatibility,
-    /// see `with_dispatcher_unchecked` which panics on cancellation.
-    pub async fn try_with_dispatcher<F, T>(
+    /// # Errors
+    ///
+    /// Returns `TaskError::Cancelled` if the scope is cancelled.
+    /// Returns `TaskError::Panicked` if the future panics.
+    /// Returns `TaskError::Aborted` if the task is dropped before completion.
+    pub async fn with_dispatcher<F, T>(
         &self,
         dispatcher: Dispatcher,
         fut: F,
-    ) -> Result<T, CancellationError>
+    ) -> Result<T, TaskError>
     where
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
@@ -112,53 +114,49 @@ impl CoroutineScope {
             // Create guard FIRST - ensures job.complete() is called even on panic
             let _guard = JobCompletionGuard::new(job);
 
-            // Race the future against cancellation (structured concurrency)
-            let result = tokio::select! {
-                res = CURRENT_SCOPE.scope(child_scope, fut) => Some(res),
-                _ = cancel_token.cancelled() => None,
+            // Spawn inner task with tokio to capture panics via JoinHandle
+            let inner_handle = tokio::spawn(CURRENT_SCOPE.scope(child_scope, async move {
+                // Race the future against cancellation (structured concurrency)
+                tokio::select! {
+                    res = fut => Ok(res),
+                    _ = cancel_token.cancelled() => Err(TaskError::Cancelled),
+                }
+            }));
+
+            // Await the inner task and check for panic
+            let result = match inner_handle.await {
+                Ok(task_result) => task_result,
+                Err(join_err) if join_err.is_panic() => {
+                    // Extract panic message
+                    let panic_payload = join_err.into_panic();
+                    let panic_msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                        s.clone()
+                    } else {
+                        "Unknown panic".to_string()
+                    };
+                    Err(TaskError::Panicked(panic_msg))
+                }
+                Err(join_err) if join_err.is_cancelled() => Err(TaskError::Cancelled),
+                Err(_) => Err(TaskError::Aborted),
             };
 
-            if let Some(res) = result {
-                let _ = tx.send(res);
-            }
+            let _ = tx.send(result);
             // Guard's Drop will call job.complete() here
         });
 
         // Also race on the receiving side - if parent is cancelled, stop waiting
         tokio::select! {
-            res = rx => res.map_err(|_| CancellationError),
-            _ = self.cancel_token.cancelled() => Err(CancellationError),
+            res = rx => res.unwrap_or(Err(TaskError::Aborted)),
+            _ = self.cancel_token.cancelled() => Err(TaskError::Cancelled),
         }
-    }
-
-    /// Switch to a different dispatcher for the given future (unchecked version)
-    ///
-    /// **Panics** if the scope is cancelled while executing.
-    ///
-    /// This method is provided for backwards compatibility and quick prototyping.
-    /// For production code, prefer `try_with_dispatcher` which returns `Result`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the scope or parent scope is cancelled during execution.
-    #[deprecated(
-        since = "0.2.0",
-        note = "Use try_with_dispatcher instead for proper error handling"
-    )]
-    pub async fn with_dispatcher<F, T>(&self, dispatcher: Dispatcher, fut: F) -> T
-    where
-        F: Future<Output = T> + Send + 'static,
-        T: Send + 'static,
-    {
-        self.try_with_dispatcher(dispatcher, fut)
-            .await
-            .expect("Scope was cancelled during with_dispatcher - use try_with_dispatcher for proper error handling")
     }
 
     /// Async task that returns a Deferred
     ///
     /// This is equivalent to Kotlin's `async(dispatcher) { ... }`.
-    /// The returned Deferred will complete with `Err(CancellationError)` if cancelled.
+    /// The returned Deferred will complete with `Err(TaskError)` if cancelled or panicked.
     pub fn async_task<F, T>(&self, dispatcher: Dispatcher, fut: F) -> Deferred<T>
     where
         F: Future<Output = T> + Send + 'static,
@@ -178,15 +176,35 @@ impl CoroutineScope {
             // Create guard FIRST - ensures job.complete() is called even on panic
             let _guard = JobCompletionGuard::new(job_for_spawn);
 
-            // Race the future against cancellation (structured concurrency)
-            let result = tokio::select! {
-                res = CURRENT_SCOPE.scope(child_scope, fut) => Some(res),
-                _ = cancel_token.cancelled() => None,
+            // Spawn inner task with tokio to capture panics via JoinHandle
+            let inner_handle = tokio::spawn(CURRENT_SCOPE.scope(child_scope, async move {
+                // Race the future against cancellation (structured concurrency)
+                tokio::select! {
+                    res = fut => Ok(res),
+                    _ = cancel_token.cancelled() => Err(TaskError::Cancelled),
+                }
+            }));
+
+            // Await the inner task and check for panic
+            let result = match inner_handle.await {
+                Ok(task_result) => task_result,
+                Err(join_err) if join_err.is_panic() => {
+                    // Extract panic message
+                    let panic_payload = join_err.into_panic();
+                    let panic_msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                        s.clone()
+                    } else {
+                        "Unknown panic".to_string()
+                    };
+                    Err(TaskError::Panicked(panic_msg))
+                }
+                Err(join_err) if join_err.is_cancelled() => Err(TaskError::Cancelled),
+                Err(_) => Err(TaskError::Aborted),
             };
 
-            if let Some(res) = result {
-                let _ = tx.send(res);
-            }
+            let _ = tx.send(result);
             // Guard's Drop will call job.complete() here
         });
 
@@ -211,7 +229,7 @@ impl CoroutineScope {
 
 /// A deferred value that can be awaited
 pub struct Deferred<T> {
-    rx: oneshot::Receiver<T>,
+    rx: oneshot::Receiver<Result<T, TaskError>>,
     job: JobHandle,
     parent_cancel_token: CancelToken,
 }
@@ -219,35 +237,19 @@ pub struct Deferred<T> {
 impl<T> Deferred<T> {
     /// Await the deferred value
     ///
-    /// Returns `Err(CancellationError)` if the task or parent scope is cancelled.
+    /// Returns `Err(TaskError)` if the task is cancelled, panics, or is aborted.
     ///
-    /// This is the recommended safe API.
-    pub async fn await_result(self) -> Result<T, CancellationError> {
+    /// # Errors
+    ///
+    /// - `TaskError::Cancelled` if the task or parent scope is cancelled
+    /// - `TaskError::Panicked` if the task panics
+    /// - `TaskError::Aborted` if the task is dropped before completion
+    pub async fn await_result(self) -> Result<T, TaskError> {
         // Race receiving the result against parent cancellation
         tokio::select! {
-            res = self.rx => res.map_err(|_| CancellationError),
-            _ = self.parent_cancel_token.cancelled() => Err(CancellationError),
+            res = self.rx => res.unwrap_or(Err(TaskError::Aborted)),
+            _ = self.parent_cancel_token.cancelled() => Err(TaskError::Cancelled),
         }
-    }
-
-    /// Await the deferred value (unchecked version)
-    ///
-    /// **Panics** if the task or parent scope is cancelled.
-    ///
-    /// This method is provided for backwards compatibility and quick prototyping.
-    /// For production code, prefer `await_result` which returns `Result`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the task or parent scope is cancelled during execution.
-    #[deprecated(
-        since = "0.2.0",
-        note = "Use await_result instead for proper error handling"
-    )]
-    pub async fn await_unchecked(self) -> T {
-        self.await_result()
-            .await
-            .expect("Deferred was cancelled - use await_result for proper error handling")
     }
 
     /// Get the job handle
@@ -301,42 +303,6 @@ macro_rules! check_cancelled {
     () => {
         if let Err(_) = $crate::check_cancellation() {
             return;
-        }
-    };
-}
-
-/// Macro to ensure the coroutine is active, panicking with a message if cancelled
-/// Similar to Kotlin's ensureActive() with panic behavior
-///
-/// **Deprecated:** This macro panics on cancellation, which is not idiomatic Rust.
-/// Use `check_cancellation()?` instead in functions that return `Result`.
-///
-/// # Example
-/// ```ignore
-/// // Old (panics):
-/// ensure_active!();
-///
-/// // New (returns Result):
-/// check_cancellation()?;
-/// ```
-///
-/// # Panics
-///
-/// Panics if the coroutine is cancelled.
-#[deprecated(
-    since = "0.2.0",
-    note = "Use check_cancellation()? instead for proper error handling"
-)]
-#[macro_export]
-macro_rules! ensure_active {
-    () => {
-        if let Err(e) = $crate::check_cancellation() {
-            panic!("Coroutine cancelled: {}", e);
-        }
-    };
-    ($msg:expr) => {
-        if let Err(_) = $crate::check_cancellation() {
-            panic!("{}", $msg);
         }
     };
 }
