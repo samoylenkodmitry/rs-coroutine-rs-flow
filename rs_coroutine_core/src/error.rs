@@ -1,11 +1,11 @@
 use std::fmt;
 
 /// Error type for task execution failures
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum TaskError {
     /// Task was cancelled
     Cancelled,
-    /// Task panicked
+    /// Task panicked (panic message)
     Panicked(String),
     /// Task was dropped/aborted before completion
     Aborted,

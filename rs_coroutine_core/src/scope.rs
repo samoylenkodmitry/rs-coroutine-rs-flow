@@ -1,7 +1,9 @@
 use crate::error::{CancellationError, TaskError};
 use crate::executor::Dispatcher;
 use crate::job::{CancelToken, JobHandle};
+use futures::FutureExt;
 use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use tokio::sync::oneshot;
 
@@ -114,32 +116,34 @@ impl CoroutineScope {
             // Create guard FIRST - ensures job.complete() is called even on panic
             let _guard = JobCompletionGuard::new(job);
 
-            // Spawn inner task with tokio to capture panics via JoinHandle
-            let inner_handle = tokio::spawn(CURRENT_SCOPE.scope(child_scope, async move {
+            // Wrap in AssertUnwindSafe and catch panics
+            // NOTE: This requires the future to be UnwindSafe. Users must ensure their
+            // futures don't have unwind-unsafe state (like non-unwind-safe mutexes).
+            let panic_catching_future = AssertUnwindSafe(CURRENT_SCOPE.scope(child_scope, async move {
                 // Race the future against cancellation (structured concurrency)
+                // Use biased select to prefer completion over cancellation
                 tokio::select! {
+                    biased;
                     res = fut => Ok(res),
                     _ = cancel_token.cancelled() => Err(TaskError::Cancelled),
                 }
-            }));
+            }))
+            .catch_unwind();
 
-            // Await the inner task and check for panic
-            let result = match inner_handle.await {
+            // Await and handle panic
+            let result = match panic_catching_future.await {
                 Ok(task_result) => task_result,
-                Err(join_err) if join_err.is_panic() => {
+                Err(panic_payload) => {
                     // Extract panic message
-                    let panic_payload = join_err.into_panic();
                     let panic_msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
                         s.to_string()
                     } else if let Some(s) = panic_payload.downcast_ref::<String>() {
                         s.clone()
                     } else {
-                        "Unknown panic".to_string()
+                        format!("panic with non-string payload")
                     };
                     Err(TaskError::Panicked(panic_msg))
                 }
-                Err(join_err) if join_err.is_cancelled() => Err(TaskError::Cancelled),
-                Err(_) => Err(TaskError::Aborted),
             };
 
             let _ = tx.send(result);
@@ -147,7 +151,9 @@ impl CoroutineScope {
         });
 
         // Also race on the receiving side - if parent is cancelled, stop waiting
+        // Use biased select to prefer completion over cancellation
         tokio::select! {
+            biased;
             res = rx => res.unwrap_or(Err(TaskError::Aborted)),
             _ = self.cancel_token.cancelled() => Err(TaskError::Cancelled),
         }
@@ -176,32 +182,32 @@ impl CoroutineScope {
             // Create guard FIRST - ensures job.complete() is called even on panic
             let _guard = JobCompletionGuard::new(job_for_spawn);
 
-            // Spawn inner task with tokio to capture panics via JoinHandle
-            let inner_handle = tokio::spawn(CURRENT_SCOPE.scope(child_scope, async move {
+            // Wrap in AssertUnwindSafe and catch panics
+            let panic_catching_future = AssertUnwindSafe(CURRENT_SCOPE.scope(child_scope, async move {
                 // Race the future against cancellation (structured concurrency)
+                // Use biased select to prefer completion over cancellation
                 tokio::select! {
+                    biased;
                     res = fut => Ok(res),
                     _ = cancel_token.cancelled() => Err(TaskError::Cancelled),
                 }
-            }));
+            }))
+            .catch_unwind();
 
-            // Await the inner task and check for panic
-            let result = match inner_handle.await {
+            // Await and handle panic
+            let result = match panic_catching_future.await {
                 Ok(task_result) => task_result,
-                Err(join_err) if join_err.is_panic() => {
+                Err(panic_payload) => {
                     // Extract panic message
-                    let panic_payload = join_err.into_panic();
                     let panic_msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
                         s.to_string()
                     } else if let Some(s) = panic_payload.downcast_ref::<String>() {
                         s.clone()
                     } else {
-                        "Unknown panic".to_string()
+                        format!("panic with non-string payload")
                     };
                     Err(TaskError::Panicked(panic_msg))
                 }
-                Err(join_err) if join_err.is_cancelled() => Err(TaskError::Cancelled),
-                Err(_) => Err(TaskError::Aborted),
             };
 
             let _ = tx.send(result);
@@ -246,7 +252,9 @@ impl<T> Deferred<T> {
     /// - `TaskError::Aborted` if the task is dropped before completion
     pub async fn await_result(self) -> Result<T, TaskError> {
         // Race receiving the result against parent cancellation
+        // Use biased select to prefer completion over cancellation
         tokio::select! {
+            biased;
             res = self.rx => res.unwrap_or(Err(TaskError::Aborted)),
             _ = self.parent_cancel_token.cancelled() => Err(TaskError::Cancelled),
         }

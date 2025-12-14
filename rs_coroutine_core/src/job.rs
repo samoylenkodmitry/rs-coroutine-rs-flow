@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 /// A cancellation token for cooperative cancellation
