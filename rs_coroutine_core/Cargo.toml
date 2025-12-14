@@ -20,7 +20,8 @@ tokio = { workspace = true, features = ["test-util"] }
 [features]
 # Test utilities for writing coroutine tests with virtual time control
 # Similar to Kotlin's TestScope
-test-utils = []
+# Enables tokio's test-util feature for pause()/advance() functionality
+test-utils = ["tokio/test-util"]
 
 [lib]
 proc-macro = false
