@@ -67,11 +67,16 @@ impl CoroutineScope {
 
             CURRENT_SCOPE
                 .scope(scope.clone(), async move {
+                    // CRITICAL: Check cancellation BEFORE starting work
+                    // This prevents "already cancelled but ran anyway" races
+                    if cancel_token.is_cancelled() {
+                        return;
+                    }
+
                     // Race the future against cancellation
-                    // This properly wakes on cancel, unlike poll-based checking
                     tokio::select! {
                         _ = cancel_token.cancelled() => {
-                            // Cancelled before completion
+                            // Cancelled during execution
                         }
                         _ = fut => {
                             // Completed normally
@@ -116,16 +121,21 @@ impl CoroutineScope {
             // Create guard FIRST - ensures job.complete() is called even on panic
             let _guard = JobCompletionGuard::new(job);
 
+            // CRITICAL: Check cancellation BEFORE starting work
+            if cancel_token.is_cancelled() {
+                let _ = tx.send(Err(TaskError::Cancelled));
+                return;
+            }
+
             // Wrap in AssertUnwindSafe and catch panics
             // NOTE: This requires the future to be UnwindSafe. Users must ensure their
             // futures don't have unwind-unsafe state (like non-unwind-safe mutexes).
             let panic_catching_future = AssertUnwindSafe(CURRENT_SCOPE.scope(child_scope, async move {
                 // Race the future against cancellation (structured concurrency)
-                // Use biased select to prefer completion over cancellation
+                // Cancellation checked first to prevent already-cancelled-but-runs race
                 tokio::select! {
-                    biased;
-                    res = fut => Ok(res),
                     _ = cancel_token.cancelled() => Err(TaskError::Cancelled),
+                    res = fut => Ok(res),
                 }
             }))
             .catch_unwind();
@@ -151,11 +161,10 @@ impl CoroutineScope {
         });
 
         // Also race on the receiving side - if parent is cancelled, stop waiting
-        // Use biased select to prefer completion over cancellation
+        // Cancellation first to ensure cancelled scopes don't accept results
         tokio::select! {
-            biased;
-            res = rx => res.unwrap_or(Err(TaskError::Aborted)),
             _ = self.cancel_token.cancelled() => Err(TaskError::Cancelled),
+            res = rx => res.unwrap_or(Err(TaskError::Aborted)),
         }
     }
 
@@ -182,14 +191,19 @@ impl CoroutineScope {
             // Create guard FIRST - ensures job.complete() is called even on panic
             let _guard = JobCompletionGuard::new(job_for_spawn);
 
+            // CRITICAL: Check cancellation BEFORE starting work
+            if cancel_token.is_cancelled() {
+                let _ = tx.send(Err(TaskError::Cancelled));
+                return;
+            }
+
             // Wrap in AssertUnwindSafe and catch panics
             let panic_catching_future = AssertUnwindSafe(CURRENT_SCOPE.scope(child_scope, async move {
                 // Race the future against cancellation (structured concurrency)
-                // Use biased select to prefer completion over cancellation
+                // Cancellation checked first to prevent already-cancelled-but-runs race
                 tokio::select! {
-                    biased;
-                    res = fut => Ok(res),
                     _ = cancel_token.cancelled() => Err(TaskError::Cancelled),
+                    res = fut => Ok(res),
                 }
             }))
             .catch_unwind();
@@ -252,11 +266,10 @@ impl<T> Deferred<T> {
     /// - `TaskError::Aborted` if the task is dropped before completion
     pub async fn await_result(self) -> Result<T, TaskError> {
         // Race receiving the result against parent cancellation
-        // Use biased select to prefer completion over cancellation
+        // Cancellation first to ensure cancelled scopes don't accept results
         tokio::select! {
-            biased;
-            res = self.rx => res.unwrap_or(Err(TaskError::Aborted)),
             _ = self.parent_cancel_token.cancelled() => Err(TaskError::Cancelled),
+            res = self.rx => res.unwrap_or(Err(TaskError::Aborted)),
         }
     }
 
@@ -280,39 +293,23 @@ pub fn get_current_scope() -> Arc<CoroutineScope> {
     CURRENT_SCOPE.with(Arc::clone)
 }
 
-/// Check if the current scope is cancelled and return an error if so
+/// Check if the current scope is cancelled
+///
+/// # Errors
+///
+/// Returns `Err(CancellationError)` if the current scope is cancelled.
 ///
 /// # Panics
 ///
-/// Panics in debug builds if called outside a CoroutineScope context.
-/// In release builds, returns `Ok(())` if not in a scope (for performance).
+/// Panics if called outside a CoroutineScope context.
+/// Use `check_cancellation_lenient()` if you need to handle this case.
 ///
-/// If you need strict checking in release builds, use `check_cancellation_strict`.
-/// If you need lenient behavior in debug builds, use `check_cancellation_lenient`.
+/// This ensures cancelled scopes always return early, preventing "zombie tasks".
 pub fn check_cancellation() -> Result<(), CancellationError> {
     match CURRENT_SCOPE.try_with(|scope| scope.is_cancelled()) {
         Ok(true) => Err(CancellationError),
         Ok(false) => Ok(()),
-        Err(_) => {
-            // In debug builds, panic to catch bugs early
-            debug_assert!(false, "check_cancellation() called outside CoroutineScope - use check_cancellation_lenient() if this is intentional");
-            // In release builds, treat as not cancelled for performance
-            Ok(())
-        }
-    }
-}
-
-/// Strict cancellation check - always errors when not in scope
-///
-/// # Errors
-///
-/// Returns `Err(NotInScopeError)` if called outside a CoroutineScope context.
-///
-/// Use this when you want to ensure code is always run within a scope.
-pub fn check_cancellation_strict() -> Result<(), crate::error::NotInScopeError> {
-    match CURRENT_SCOPE.try_with(|scope| scope.is_cancelled()) {
-        Ok(true) | Ok(false) => Ok(()),
-        Err(_) => Err(crate::error::NotInScopeError),
+        Err(_) => panic!("check_cancellation() called outside CoroutineScope - use check_cancellation_lenient() if intentional"),
     }
 }
 
@@ -326,6 +323,20 @@ pub fn check_cancellation_lenient() -> Result<(), CancellationError> {
     match CURRENT_SCOPE.try_with(|scope| scope.is_cancelled()) {
         Ok(true) => Err(CancellationError),
         Ok(false) | Err(_) => Ok(()),
+    }
+}
+
+/// Check if currently executing within a CoroutineScope
+///
+/// # Errors
+///
+/// Returns `Err(NotInScopeError)` if called outside a CoroutineScope context.
+///
+/// Use this to verify scope context before performing scope-dependent operations.
+pub fn require_scope() -> Result<(), crate::error::NotInScopeError> {
+    match CURRENT_SCOPE.try_with(|_| ()) {
+        Ok(()) => Ok(()),
+        Err(_) => Err(crate::error::NotInScopeError),
     }
 }
 

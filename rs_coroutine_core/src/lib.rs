@@ -14,7 +14,7 @@ pub use error::{CancellationError, NotInScopeError, TaskError};
 pub use executor::{Dispatcher, Dispatchers, Executor, TokioExecutor};
 pub use job::{CancelToken, JobHandle};
 pub use scope::{
-    check_cancellation, check_cancellation_lenient, check_cancellation_strict, get_current_scope,
+    check_cancellation, check_cancellation_lenient, get_current_scope, require_scope,
     with_current_scope, yield_now, CoroutineScope, Deferred, CURRENT_SCOPE,
 };
 pub use suspending::Suspending;
