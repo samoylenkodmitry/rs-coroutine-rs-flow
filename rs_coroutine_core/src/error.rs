@@ -40,3 +40,15 @@ impl From<CancellationError> for TaskError {
         TaskError::Cancelled
     }
 }
+
+/// Error returned when cancellation check is performed outside a scope
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotInScopeError;
+
+impl std::fmt::Display for NotInScopeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Operation requires being inside a CoroutineScope")
+    }
+}
+
+impl std::error::Error for NotInScopeError {}

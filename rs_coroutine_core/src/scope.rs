@@ -281,14 +281,51 @@ pub fn get_current_scope() -> Arc<CoroutineScope> {
 }
 
 /// Check if the current scope is cancelled and return an error if so
-/// This can be used in async functions to check for cancellation
 ///
-/// Returns Ok(()) if not in a scope context (instead of panicking)
+/// # Panics
+///
+/// Panics in debug builds if called outside a CoroutineScope context.
+/// In release builds, returns `Ok(())` if not in a scope (for performance).
+///
+/// If you need strict checking in release builds, use `check_cancellation_strict`.
+/// If you need lenient behavior in debug builds, use `check_cancellation_lenient`.
 pub fn check_cancellation() -> Result<(), CancellationError> {
     match CURRENT_SCOPE.try_with(|scope| scope.is_cancelled()) {
         Ok(true) => Err(CancellationError),
         Ok(false) => Ok(()),
-        Err(_) => Ok(()), // Not in a scope context - treat as not cancelled
+        Err(_) => {
+            // In debug builds, panic to catch bugs early
+            debug_assert!(false, "check_cancellation() called outside CoroutineScope - use check_cancellation_lenient() if this is intentional");
+            // In release builds, treat as not cancelled for performance
+            Ok(())
+        }
+    }
+}
+
+/// Strict cancellation check - always errors when not in scope
+///
+/// # Errors
+///
+/// Returns `Err(NotInScopeError)` if called outside a CoroutineScope context.
+///
+/// Use this when you want to ensure code is always run within a scope.
+pub fn check_cancellation_strict() -> Result<(), crate::error::NotInScopeError> {
+    match CURRENT_SCOPE.try_with(|scope| scope.is_cancelled()) {
+        Ok(true) | Ok(false) => Ok(()),
+        Err(_) => Err(crate::error::NotInScopeError),
+    }
+}
+
+/// Lenient cancellation check - never errors when not in scope
+///
+/// Returns `Ok(())` if not in a scope context (treats as not cancelled).
+///
+/// Use this when cancellation checking is optional or when code
+/// might legitimately run outside a scope.
+pub fn check_cancellation_lenient() -> Result<(), CancellationError> {
+    match CURRENT_SCOPE.try_with(|scope| scope.is_cancelled()) {
+        Ok(true) => Err(CancellationError),
+        Ok(false) | Err(_) => Ok(()),
     }
 }
 
