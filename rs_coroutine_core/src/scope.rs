@@ -257,6 +257,7 @@ impl<T> Deferred<T> {
                 match join_result {
                     Ok(()) => {
                         // Task completed normally, get result from oneshot
+                        // RecvError only occurs if sender dropped without sending (runtime abort/shutdown)
                         self.rx.await.unwrap_or(Err(TaskError::Aborted))
                     }
                     Err(join_err) if join_err.is_panic() => {
@@ -276,6 +277,48 @@ impl<T> Deferred<T> {
                         Err(TaskError::Aborted)
                     }
                 }
+            }
+        }
+    }
+
+    /// Await the deferred value without being interrupted by parent cancellation
+    ///
+    /// This method does NOT race against parent cancellation. It will wait for the
+    /// child task to complete (or be cancelled by its own scope) and return the result.
+    ///
+    /// Use this when you need to retrieve a result that may already be computed,
+    /// even if the parent scope has been cancelled.
+    ///
+    /// # Errors
+    ///
+    /// - `TaskError::Cancelled` if the CHILD task itself was cancelled
+    /// - `TaskError::Panicked` if the task panics
+    /// - `TaskError::Aborted` if the task is dropped before completion
+    ///
+    /// Note: This will NOT return `TaskError::Cancelled` due to parent cancellation.
+    pub async fn await_uninterruptible(self) -> Result<T, TaskError> {
+        // Do NOT race against parent cancellation - just wait for task completion
+        match self.join_handle.await {
+            Ok(()) => {
+                // Task completed normally, get result from oneshot
+                // RecvError only occurs if sender dropped without sending (runtime abort/shutdown)
+                self.rx.await.unwrap_or(Err(TaskError::Aborted))
+            }
+            Err(join_err) if join_err.is_panic() => {
+                // Task panicked - use JoinError to get panic info (proper Tokio idiom)
+                let panic_payload = join_err.into_panic();
+                let panic_msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "panic with non-string payload".to_string()
+                };
+                Err(TaskError::Panicked(panic_msg))
+            }
+            Err(_) => {
+                // Task cancelled by runtime shutdown
+                Err(TaskError::Aborted)
             }
         }
     }

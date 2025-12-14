@@ -113,3 +113,88 @@ impl Default for JobHandle {
         Self::new()
     }
 }
+
+/// A guard that cancels a job when dropped
+///
+/// This is useful for background tasks that should be cancelled if the owner is dropped.
+/// For example, Flow operators can use this to ensure producer tasks are cleaned up.
+pub struct CancelOnDrop {
+    job: Option<JobHandle>,
+}
+
+impl CancelOnDrop {
+    /// Create a new CancelOnDrop guard for a job
+    pub fn new(job: JobHandle) -> Self {
+        Self { job: Some(job) }
+    }
+
+    /// Get a reference to the job handle
+    pub fn job(&self) -> &JobHandle {
+        self.job.as_ref().expect("CancelOnDrop job already taken")
+    }
+
+    /// Take the job handle, disabling automatic cancellation
+    pub fn into_inner(mut self) -> JobHandle {
+        self.job.take().expect("CancelOnDrop job already taken")
+    }
+}
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        if let Some(job) = &self.job {
+            job.cancel();
+            // Note: We cancel but don't join() - the task will stop cooperatively
+            // Joining would block the Drop, which is not allowed in async contexts
+        }
+    }
+}
+
+/// A guard that aborts a Tokio JoinHandle when dropped
+///
+/// This is useful for unstructured background tasks (tokio::spawn) that should
+/// be aborted if the owner is dropped.
+pub struct AbortOnDrop<T> {
+    handle: Option<tokio::task::JoinHandle<T>>,
+}
+
+impl<T> AbortOnDrop<T> {
+    /// Create a new AbortOnDrop guard for a JoinHandle
+    pub fn new(handle: tokio::task::JoinHandle<T>) -> Self {
+        Self {
+            handle: Some(handle),
+        }
+    }
+
+    /// Get a reference to the handle
+    pub fn handle(&self) -> &tokio::task::JoinHandle<T> {
+        self.handle.as_ref().expect("AbortOnDrop handle already taken")
+    }
+
+    /// Take the handle, disabling automatic abort
+    pub fn into_inner(mut self) -> tokio::task::JoinHandle<T> {
+        self.handle.take().expect("AbortOnDrop handle already taken")
+    }
+
+    /// Abort the task
+    pub fn abort(&self) {
+        if let Some(handle) = &self.handle {
+            handle.abort();
+        }
+    }
+}
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        if let Some(handle) = &self.handle {
+            handle.abort();
+        }
+    }
+}
+
+impl<T> std::ops::Deref for AbortOnDrop<T> {
+    type Target = tokio::task::JoinHandle<T>;
+
+    fn deref(&self) -> &Self::Target {
+        self.handle()
+    }
+}

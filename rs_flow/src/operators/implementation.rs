@@ -1,17 +1,9 @@
 use super::*;
+use rs_coroutine_core::check_cancellation_lenient;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
-
-/// Helper to check if the current scope is cancelled (if available)
-/// Returns true if cancelled, false otherwise or if not in a scope
-fn is_scope_cancelled() -> bool {
-    use crate::CURRENT_SCOPE;
-    CURRENT_SCOPE
-        .try_with(|scope| scope.is_cancelled())
-        .unwrap_or(false)
-}
 
 impl<T> FlowExt<T> for Flow<T>
 where
@@ -33,8 +25,8 @@ where
                         let f = Arc::clone(&f);
                         let collector = collector.clone();
                         async move {
-                            // Check cancellation before processing
-                            if is_scope_cancelled() {
+                            // Check cancellation before processing (lenient: no-op if not in scope)
+                            if check_cancellation_lenient().is_err() {
                                 return;
                             }
                             let mapped = f(value).await;
@@ -62,8 +54,8 @@ where
                         let predicate = Arc::clone(&predicate);
                         let collector = collector.clone();
                         async move {
-                            // Check cancellation before processing
-                            if is_scope_cancelled() {
+                            // Check cancellation before processing (lenient: no-op if not in scope)
+                            if check_cancellation_lenient().is_err() {
                                 return;
                             }
                             if predicate(&value).await {
@@ -77,6 +69,8 @@ where
     }
 
     fn take(self, count: usize) -> Flow<T> {
+        use rs_coroutine_core::AbortOnDrop;
+
         Flow::new(move |collector| {
             let upstream = self.clone();
             async move {
@@ -88,8 +82,8 @@ where
                 let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let done_clone = Arc::clone(&done);
 
-                // Spawn upstream collection
-                let producer = tokio::spawn(async move {
+                // Spawn upstream collection with abort-on-drop guard
+                let _producer = AbortOnDrop::new(tokio::spawn(async move {
                     upstream
                         .collect(move |value| {
                             let tx = tx.clone();
@@ -105,7 +99,7 @@ where
                             }
                         })
                         .await;
-                });
+                }));
 
                 // Receive exactly `count` values then stop
                 let mut received = 0;
@@ -118,21 +112,24 @@ where
                     }
                 }
 
-                // Signal upstream to stop and abort
+                // Signal upstream to stop
+                // Guard will abort producer on drop
                 done.store(true, Ordering::SeqCst);
                 drop(rx);
-                producer.abort();
             }
         })
     }
 
     fn buffer(self, capacity: usize) -> Flow<T> {
+        use rs_coroutine_core::AbortOnDrop;
+
         Flow::new(move |collector| {
             let upstream = self.clone();
             async move {
                 let (tx, mut rx) = mpsc::channel(capacity);
 
-                let producer = tokio::spawn(async move {
+                // Spawn upstream collection with abort-on-drop guard
+                let _producer = AbortOnDrop::new(tokio::spawn(async move {
                     upstream
                         .collect(move |value| {
                             let tx = tx.clone();
@@ -141,19 +138,19 @@ where
                             }
                         })
                         .await;
-                });
+                }));
 
                 while let Some(value) = rx.recv().await {
-                    // Check cancellation before emitting
-                    if is_scope_cancelled() {
+                    // Check cancellation before emitting (lenient: no-op if not in scope)
+                    if check_cancellation_lenient().is_err() {
                         drop(rx);
-                        producer.abort();
+                        // Guard will abort producer on drop
                         return;
                     }
                     collector.emit(value).await;
                 }
 
-                let _ = producer.await;
+                // Producer completes naturally, guard cleans up
             }
         })
     }
@@ -190,7 +187,8 @@ where
         F: Fn(T) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Flow<U>> + Send + 'static,
     {
-        use crate::{JobHandle, CURRENT_SCOPE};
+        use crate::CURRENT_SCOPE;
+        use rs_coroutine_core::CancelOnDrop;
 
         let f = Arc::new(f);
         Flow::new(move |collector| {
@@ -199,8 +197,8 @@ where
             async move {
                 let (tx, mut rx) = mpsc::channel::<Flow<U>>(1);
 
-                // Use structured concurrency instead of tokio::spawn
-                let producer = CURRENT_SCOPE.with(|scope| {
+                // Use structured concurrency with cancel-on-drop guard
+                let _producer = CancelOnDrop::new(CURRENT_SCOPE.with(|scope| {
                     scope.launch({
                         let f = Arc::clone(&f);
                         async move {
@@ -216,14 +214,15 @@ where
                                 .await;
                         }
                     })
-                });
+                }));
 
-                let mut current_collector: Option<JobHandle> = None;
+                let mut current_collector: Option<CancelOnDrop> = None;
 
                 while let Some(inner_flow) = rx.recv().await {
                     // Cancel the previous inner flow collection and WAIT for it to finish
                     // This prevents overlapping inner flow collections (semantic correctness)
-                    if let Some(handle) = current_collector.take() {
+                    if let Some(guard) = current_collector.take() {
+                        let handle = guard.into_inner(); // Take ownership to prevent double-cancel
                         handle.cancel();
                         handle.join().await; // CRITICAL: wait for cancellation to complete
                     }
@@ -243,15 +242,15 @@ where
                         })
                     });
 
-                    current_collector = Some(handle);
+                    current_collector = Some(CancelOnDrop::new(handle));
                 }
 
                 // Wait for the last inner flow to complete
-                if let Some(handle) = current_collector {
-                    handle.join().await;
+                if let Some(guard) = current_collector {
+                    guard.into_inner().join().await;
                 }
 
-                producer.join().await;
+                // Producer guard will cancel on drop
             }
         })
     }
@@ -271,8 +270,8 @@ where
                         let f = Arc::clone(&f);
                         let collector = collector.clone();
                         async move {
-                            // Check cancellation before processing
-                            if is_scope_cancelled() {
+                            // Check cancellation before processing (lenient: no-op if not in scope)
+                            if check_cancellation_lenient().is_err() {
                                 return;
                             }
                             let mapped = f(value);
@@ -299,8 +298,8 @@ where
                         let predicate = Arc::clone(&predicate);
                         let collector = collector.clone();
                         async move {
-                            // Check cancellation before processing
-                            if is_scope_cancelled() {
+                            // Check cancellation before processing (lenient: no-op if not in scope)
+                            if check_cancellation_lenient().is_err() {
                                 return;
                             }
                             if predicate(&value) {
