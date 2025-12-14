@@ -73,15 +73,10 @@ impl CoroutineScope {
                         return;
                     }
 
-                    // Race the future against cancellation
-                    tokio::select! {
-                        _ = cancel_token.cancelled() => {
-                            // Cancelled during execution
-                        }
-                        _ = fut => {
-                            // Completed normally
-                        }
-                    }
+                    // Run the future to completion
+                    // Cancellation is cooperative - propagates through suspension points
+                    // (with_dispatcher, async_task, check_cancellation, etc.)
+                    fut.await;
                 })
                 .await;
             // Guard's Drop will call job.complete() here
@@ -132,8 +127,9 @@ impl CoroutineScope {
             // futures don't have unwind-unsafe state (like non-unwind-safe mutexes).
             let panic_catching_future = AssertUnwindSafe(CURRENT_SCOPE.scope(child_scope, async move {
                 // Race the future against cancellation (structured concurrency)
-                // Cancellation checked first to prevent already-cancelled-but-runs race
+                // biased + cancellation-first = deterministic cancellation semantics
                 tokio::select! {
+                    biased;
                     _ = cancel_token.cancelled() => Err(TaskError::Cancelled),
                     res = fut => Ok(res),
                 }
@@ -150,7 +146,7 @@ impl CoroutineScope {
                     } else if let Some(s) = panic_payload.downcast_ref::<String>() {
                         s.clone()
                     } else {
-                        format!("panic with non-string payload")
+                        "panic with non-string payload".to_string()
                     };
                     Err(TaskError::Panicked(panic_msg))
                 }
@@ -161,8 +157,9 @@ impl CoroutineScope {
         });
 
         // Also race on the receiving side - if parent is cancelled, stop waiting
-        // Cancellation first to ensure cancelled scopes don't accept results
+        // biased + cancellation-first = deterministic: once parent cancelled, always return Cancelled
         tokio::select! {
+            biased;
             _ = self.cancel_token.cancelled() => Err(TaskError::Cancelled),
             res = rx => res.unwrap_or(Err(TaskError::Aborted)),
         }
@@ -200,8 +197,9 @@ impl CoroutineScope {
             // Wrap in AssertUnwindSafe and catch panics
             let panic_catching_future = AssertUnwindSafe(CURRENT_SCOPE.scope(child_scope, async move {
                 // Race the future against cancellation (structured concurrency)
-                // Cancellation checked first to prevent already-cancelled-but-runs race
+                // biased + cancellation-first = deterministic cancellation semantics
                 tokio::select! {
+                    biased;
                     _ = cancel_token.cancelled() => Err(TaskError::Cancelled),
                     res = fut => Ok(res),
                 }
@@ -218,7 +216,7 @@ impl CoroutineScope {
                     } else if let Some(s) = panic_payload.downcast_ref::<String>() {
                         s.clone()
                     } else {
-                        format!("panic with non-string payload")
+                        "panic with non-string payload".to_string()
                     };
                     Err(TaskError::Panicked(panic_msg))
                 }
@@ -266,8 +264,9 @@ impl<T> Deferred<T> {
     /// - `TaskError::Aborted` if the task is dropped before completion
     pub async fn await_result(self) -> Result<T, TaskError> {
         // Race receiving the result against parent cancellation
-        // Cancellation first to ensure cancelled scopes don't accept results
+        // biased + cancellation-first = deterministic: once parent cancelled, always return Cancelled
         tokio::select! {
+            biased;
             _ = self.parent_cancel_token.cancelled() => Err(TaskError::Cancelled),
             res = self.rx => res.unwrap_or(Err(TaskError::Aborted)),
         }
