@@ -104,11 +104,36 @@ where
 /// A Stream adapter for Flow
 ///
 /// This converts a callback-based Flow<T> into a poll-based Stream<Item = T>
-/// by using a channel internally. The flow collection happens in a background task
-/// that is automatically aborted when this stream is dropped.
+/// by using a channel internally. The flow collection happens in a background task.
+///
+/// When the stream is dropped:
+/// - If in a CoroutineScope: task will be cancelled cooperatively via scope cancellation
+/// - If not in a scope: task will be aborted (fallback for backward compatibility)
 pub struct FlowStream<T> {
     rx: mpsc::Receiver<T>,
-    _task: rs_coroutine_core::AbortOnDrop<()>,
+    _task: FlowStreamGuard,
+}
+
+/// Guard for FlowStream background task
+///
+/// This wraps a ScopeAwareHandle and provides abort-on-drop for unscoped tasks
+/// while relying on scope cancellation for scoped tasks.
+struct FlowStreamGuard(crate::internal_utils::ScopeAwareHandle);
+
+impl Drop for FlowStreamGuard {
+    fn drop(&mut self) {
+        // For scoped tasks, scope cancellation will handle cleanup cooperatively
+        // For unscoped tasks (fallback), we need to abort since there's no scope to cancel
+        match &self.0 {
+            crate::internal_utils::ScopeAwareHandle::Scoped(_) => {
+                // Scoped task will be cancelled via scope - no action needed here
+            }
+            crate::internal_utils::ScopeAwareHandle::Unscoped(handle) => {
+                // Unscoped fallback - abort the task since there's no scope to signal
+                handle.abort();
+            }
+        }
+    }
 }
 
 impl<T> FlowStream<T>
@@ -116,11 +141,11 @@ where
     T: Send + 'static,
 {
     fn new(flow: Flow<T>, buffer_size: usize) -> Self {
+        use crate::internal_utils::spawn_in_scope;
         let (tx, rx) = mpsc::channel(buffer_size);
 
-        // TODO: This uses unstructured tokio::spawn with AbortOnDrop
-        // Should be integrated with scoped spawning + cooperative cancellation (issue #4)
-        let task = tokio::spawn(async move {
+        // Spawn collection task in current scope if available
+        let task = spawn_in_scope(async move {
             flow.collect(move |value| {
                 let tx = tx.clone();
                 async move {
@@ -133,7 +158,7 @@ where
 
         Self {
             rx,
-            _task: rs_coroutine_core::AbortOnDrop::new(task),
+            _task: FlowStreamGuard(task),
         }
     }
 }
