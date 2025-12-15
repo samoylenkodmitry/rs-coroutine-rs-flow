@@ -27,6 +27,9 @@ async fn test_deeply_nested_cancellation() {
     ]);
     let started = Arc::new(Notify::new());
 
+    // Create notified future BEFORE launching task (Notify requires this)
+    let notified = started.notified();
+
     let counters_clone = Arc::clone(&counters);
     let root_clone = Arc::clone(&root);
     let started_clone = Arc::clone(&started);
@@ -97,7 +100,7 @@ async fn test_deeply_nested_cancellation() {
     });
 
     // Wait for deepest level to start (deterministic)
-    started.notified().await;
+    notified.await;
 
     // Cancel from root - should propagate to all 5 levels
     root.cancel();
@@ -147,9 +150,14 @@ async fn test_diamond_dependency_cancellation() {
         AtomicBool::new(false), // Node C
         AtomicBool::new(false), // Node D
     ]);
+    let all_started = Arc::new(Notify::new());
+
+    // Create notified future BEFORE launching task (Notify requires this)
+    let notified = all_started.notified();
 
     let visited_clone = Arc::clone(&visited);
     let root_a = Arc::clone(&root);
+    let all_started_clone = Arc::clone(&all_started);
 
     let job_a = root.launch(async move {
         visited_clone[0].store(true, Ordering::SeqCst);
@@ -157,6 +165,7 @@ async fn test_diamond_dependency_cancellation() {
         let root_b = Arc::clone(&root_a);
         let visited_b = Arc::clone(&visited_clone);
         let visited_c = Arc::clone(&visited_clone);
+        let all_started_b = Arc::clone(&all_started_clone);
 
         // Launch B and C in parallel
         let task_b = root_a.async_task(Dispatchers::io(), async move {
@@ -167,6 +176,9 @@ async fn test_diamond_dependency_cancellation() {
             root_b
                 .with_dispatcher(Dispatchers::io(), async move {
                     visited_d1[3].store(true, Ordering::SeqCst);
+
+                    // Signal that all nodes have started
+                    all_started_b.notify_one();
 
                     // D does work
                     for _ in 0..10 {
@@ -195,8 +207,8 @@ async fn test_diamond_dependency_cancellation() {
         let _ = futures::join!(task_b.await_result(), task_c.await_result());
     });
 
-    // Let diamond form
-    sleep(Duration::from_millis(10)).await;
+    // Wait for all nodes to start (deterministic)
+    notified.await;
 
     // Cancel A - should cancel B, C, and D
     root.cancel();
@@ -218,10 +230,15 @@ async fn test_fan_out_cancellation() {
     let root = Arc::new(CoroutineScope::new(Dispatchers::main()));
     let completed = Arc::new(AtomicUsize::new(0));
     let started = Arc::new(AtomicUsize::new(0));
+    let all_started = Arc::new(Notify::new());
+
+    // Create notified future BEFORE launching task (Notify requires this)
+    let notified = all_started.notified();
 
     let root_clone = Arc::clone(&root);
     let completed_clone = Arc::clone(&completed);
     let started_clone = Arc::clone(&started);
+    let all_started_clone = Arc::clone(&all_started);
 
     let job = root.launch(async move {
         // Spawn 10 parallel tasks
@@ -231,9 +248,15 @@ async fn test_fan_out_cancellation() {
             let scope = Arc::clone(&root_clone);
             let completed_inner = Arc::clone(&completed_clone);
             let started_inner = Arc::clone(&started_clone);
+            let all_started_inner = Arc::clone(&all_started_clone);
 
             let task = scope.async_task(Dispatchers::io(), async move {
-                started_inner.fetch_add(1, Ordering::SeqCst);
+                let count = started_inner.fetch_add(1, Ordering::SeqCst);
+
+                // When last task starts, signal all started
+                if count == 9 {
+                    all_started_inner.notify_one();
+                }
 
                 // Each task does work
                 for _ in 0..20 {
@@ -256,8 +279,8 @@ async fn test_fan_out_cancellation() {
         }
     });
 
-    // Let tasks start
-    sleep(Duration::from_millis(10)).await;
+    // Wait for all tasks to start (deterministic)
+    notified.await;
 
     // Cancel root - should cancel all 10 children
     root.cancel();
@@ -284,9 +307,14 @@ async fn test_fan_out_cancellation() {
 async fn test_dispatcher_hopping_cancellation() {
     let root = Arc::new(CoroutineScope::new(Dispatchers::main()));
     let hops = Arc::new(AtomicUsize::new(0));
+    let all_hops_done = Arc::new(Notify::new());
+
+    // Create notified future BEFORE launching task (Notify requires this)
+    let notified = all_hops_done.notified();
 
     let root_clone = Arc::clone(&root);
     let hops_clone = Arc::clone(&hops);
+    let all_hops_clone = Arc::clone(&all_hops_done);
 
     let job = root.launch(async move {
         let root1 = Arc::clone(&root_clone);
@@ -310,6 +338,9 @@ async fn test_dispatcher_hopping_cancellation() {
                                     .with_dispatcher(Dispatchers::main(), async move {
                                         hops_clone.fetch_add(1, Ordering::SeqCst); // Hop 4: main
 
+                                        // Signal all hops complete
+                                        all_hops_clone.notify_one();
+
                                         // Do work on 5th dispatcher
                                         for _ in 0..20 {
                                             if check_cancellation().is_err() {
@@ -330,8 +361,8 @@ async fn test_dispatcher_hopping_cancellation() {
         assert!(result1.is_err());
     });
 
-    // Let dispatcher hops execute
-    sleep(Duration::from_millis(15)).await;
+    // Wait for all dispatcher hops to execute (deterministic)
+    notified.await;
 
     // Cancel root
     root.cancel();

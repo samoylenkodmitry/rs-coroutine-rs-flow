@@ -187,8 +187,8 @@ where
         F: Fn(T) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Flow<U>> + Send + 'static,
     {
-        use crate::CURRENT_SCOPE;
-        use rs_coroutine_core::CancelOnDrop;
+        use futures::StreamExt;
+        use rs_coroutine_core::AbortOnDrop;
 
         let f = Arc::new(f);
         Flow::new(move |collector| {
@@ -197,60 +197,52 @@ where
             async move {
                 let (tx, mut rx) = mpsc::channel::<Flow<U>>(1);
 
-                // Use structured concurrency with cancel-on-drop guard
-                let _producer = CancelOnDrop::new(CURRENT_SCOPE.with(|scope| {
-                    scope.launch({
-                        let f = Arc::clone(&f);
-                        async move {
-                            upstream
-                                .collect(move |value| {
-                                    let f = Arc::clone(&f);
-                                    let tx = tx.clone();
-                                    async move {
-                                        let flow = f(value).await;
-                                        let _ = tx.send(flow).await;
-                                    }
-                                })
-                                .await;
-                        }
-                    })
+                // Spawn producer task to transform upstream values to flows
+                let _producer = AbortOnDrop::new(tokio::spawn({
+                    let f = Arc::clone(&f);
+                    async move {
+                        upstream
+                            .collect(move |value| {
+                                let f = Arc::clone(&f);
+                                let tx = tx.clone();
+                                async move {
+                                    let flow = f(value).await;
+                                    let _ = tx.send(flow).await;
+                                }
+                            })
+                            .await;
+                    }
                 }));
 
-                let mut current_collector: Option<CancelOnDrop> = None;
+                // Single consumer loop using select! to switch between flows
+                let mut current_stream: Option<crate::FlowStream<U>> = None;
 
-                while let Some(inner_flow) = rx.recv().await {
-                    // Cancel the previous inner flow collection and WAIT for it to finish
-                    // This prevents overlapping inner flow collections (semantic correctness)
-                    if let Some(guard) = current_collector.take() {
-                        let handle = guard.into_inner(); // Take ownership to prevent double-cancel
-                        handle.cancel();
-                        handle.join().await; // CRITICAL: wait for cancellation to complete
+                loop {
+                    tokio::select! {
+                        biased;
+
+                        // New flow arrived - switch to it
+                        Some(new_flow) = rx.recv() => {
+                            // Drop old stream (aborts its collection task)
+                            current_stream = Some(new_flow.to_stream(16));
+                        }
+
+                        // Next element from current flow
+                        Some(value) = async {
+                            match &mut current_stream {
+                                Some(stream) => stream.next().await,
+                                None => None,
+                            }
+                        } => {
+                            collector.emit(value).await;
+                        }
+
+                        // Both branches exhausted
+                        else => break,
                     }
-
-                    // Start collecting the new inner flow using structured concurrency
-                    let collector = collector.clone();
-                    let handle = CURRENT_SCOPE.with(|scope| {
-                        scope.launch(async move {
-                            inner_flow
-                                .collect(move |value| {
-                                    let collector = collector.clone();
-                                    async move {
-                                        collector.emit(value).await;
-                                    }
-                                })
-                                .await;
-                        })
-                    });
-
-                    current_collector = Some(CancelOnDrop::new(handle));
                 }
 
-                // Wait for the last inner flow to complete
-                if let Some(guard) = current_collector {
-                    guard.into_inner().join().await;
-                }
-
-                // Producer guard will cancel on drop
+                // Producer guard will abort on drop
             }
         })
     }

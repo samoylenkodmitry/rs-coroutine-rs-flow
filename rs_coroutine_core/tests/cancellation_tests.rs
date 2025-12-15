@@ -44,6 +44,9 @@ async fn test_scope_cancellation_propagates_to_child_scopes() {
     let child_cancelled = Arc::new(AtomicBool::new(false));
     let started = Arc::new(Notify::new());
 
+    // Create notified future BEFORE launching task (Notify requires this)
+    let notified = started.notified();
+
     // Launch a task that uses with_dispatcher (creates child scope)
     let child_cancelled_clone = Arc::clone(&child_cancelled);
     let scope_clone = Arc::clone(&scope);
@@ -76,7 +79,7 @@ async fn test_scope_cancellation_propagates_to_child_scopes() {
     });
 
     // Wait for task to start (deterministic)
-    started.notified().await;
+    notified.await;
 
     // Cancel the scope
     scope.cancel();
@@ -95,6 +98,9 @@ async fn test_cancel_token_cancelled_await() {
     let started = Arc::new(Notify::new());
     let started_clone = Arc::clone(&started);
 
+    // Create notified future BEFORE spawning task (Notify requires this)
+    let notified = started.notified();
+
     // Spawn a task that waits for cancellation
     let handle = tokio::spawn(async move {
         started_clone.notify_one();
@@ -103,7 +109,7 @@ async fn test_cancel_token_cancelled_await() {
     });
 
     // Wait for task to start (deterministic)
-    started.notified().await;
+    notified.await;
 
     // Cancel the token
     token.cancel();
@@ -125,6 +131,9 @@ async fn test_hierarchical_cancel_token_await() {
     let started = Arc::new(Notify::new());
     let started_clone = Arc::clone(&started);
 
+    // Create notified future BEFORE spawning task (Notify requires this)
+    let notified = started.notified();
+
     // Wait on child
     let handle = tokio::spawn(async move {
         started_clone.notify_one();
@@ -133,7 +142,7 @@ async fn test_hierarchical_cancel_token_await() {
     });
 
     // Wait for task to start (deterministic)
-    started.notified().await;
+    notified.await;
 
     // Cancel parent
     parent.cancel();
@@ -169,6 +178,9 @@ async fn test_async_task_respects_scope_cancellation() {
     let scope = Arc::new(CoroutineScope::new(Dispatchers::main()));
     let started = Arc::new(Notify::new());
 
+    // Create notified future BEFORE launching task (Notify requires this)
+    let notified = started.notified();
+
     let started_clone = Arc::clone(&started);
 
     let deferred = scope.async_task(Dispatchers::io(), async move {
@@ -179,7 +191,7 @@ async fn test_async_task_respects_scope_cancellation() {
     });
 
     // Wait for task to start (deterministic)
-    started.notified().await;
+    notified.await;
 
     // Cancel scope
     scope.cancel();
@@ -197,6 +209,9 @@ async fn test_multiple_nested_scopes() {
     let root = Arc::new(CoroutineScope::new(Dispatchers::main()));
     let deepest_saw_cancellation = Arc::new(AtomicBool::new(false));
     let started = Arc::new(Notify::new());
+
+    // Create notified future BEFORE launching task (Notify requires this)
+    let notified = started.notified();
 
     let flag_clone = Arc::clone(&deepest_saw_cancellation);
     let root_clone = Arc::clone(&root);
@@ -241,7 +256,7 @@ async fn test_multiple_nested_scopes() {
     });
 
     // Wait for task to start (deterministic)
-    started.notified().await;
+    notified.await;
 
     // Cancel root
     root.cancel();

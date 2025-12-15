@@ -1,6 +1,9 @@
+use futures::stream::Stream;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
+use tokio::sync::mpsc;
 
 type FlowFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
@@ -72,6 +75,73 @@ where
     {
         let collector = FlowCollector::new(on_value);
         (self.collect_fn)(collector).await
+    }
+
+    /// Convert this Flow to a Stream
+    ///
+    /// This allows using Flow with Stream combinators and select! macros.
+    /// The conversion spawns a background task to collect from the flow,
+    /// using a bounded channel (buffer_size) to manage backpressure.
+    ///
+    /// The background task is automatically aborted when the returned Stream is dropped.
+    ///
+    /// # Example
+    /// ```ignore
+    /// use futures::StreamExt;
+    ///
+    /// let flow = flow_of!(1, 2, 3);
+    /// let mut stream = flow.to_stream(10);
+    ///
+    /// while let Some(value) = stream.next().await {
+    ///     println!("{}", value);
+    /// }
+    /// ```
+    pub fn to_stream(self, buffer_size: usize) -> FlowStream<T> {
+        FlowStream::new(self, buffer_size)
+    }
+}
+
+/// A Stream adapter for Flow
+///
+/// This converts a callback-based Flow<T> into a poll-based Stream<Item = T>
+/// by using a channel internally. The flow collection happens in a background task
+/// that is automatically aborted when this stream is dropped.
+pub struct FlowStream<T> {
+    rx: mpsc::Receiver<T>,
+    _task: rs_coroutine_core::AbortOnDrop<()>,
+}
+
+impl<T> FlowStream<T>
+where
+    T: Send + 'static,
+{
+    fn new(flow: Flow<T>, buffer_size: usize) -> Self {
+        let (tx, rx) = mpsc::channel(buffer_size);
+
+        // Spawn collection task with abort-on-drop
+        let task = tokio::spawn(async move {
+            flow.collect(move |value| {
+                let tx = tx.clone();
+                async move {
+                    // Send value, ignoring errors (receiver dropped means stream dropped)
+                    let _ = tx.send(value).await;
+                }
+            })
+            .await;
+        });
+
+        Self {
+            rx,
+            _task: rs_coroutine_core::AbortOnDrop::new(task),
+        }
+    }
+}
+
+impl<T> Stream for FlowStream<T> {
+    type Item = T;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.rx.poll_recv(cx)
     }
 }
 

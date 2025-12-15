@@ -11,7 +11,7 @@ pub mod operators;
 pub mod suspending_ext;
 pub mod terminal;
 
-pub use flow::{flow as flow_fn, flow, Flow, FlowCollector};
+pub use flow::{flow as flow_fn, flow, Flow, FlowCollector, FlowStream};
 pub use hot_flow::{SharedFlow, StateFlow};
 pub use operators::FlowExt;
 pub use suspending_ext::SuspendingExt;
