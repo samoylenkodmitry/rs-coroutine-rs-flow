@@ -227,17 +227,22 @@ where
                             current_stream = Some(new_flow.to_stream(16));
                         }
 
-                        // Next element from current flow
-                        Some(value) = async {
-                            match &mut current_stream {
+                        // Next element from current flow (if exists)
+                        value = async {
+                            match current_stream.as_mut() {
                                 Some(stream) => stream.next().await,
-                                None => None,
+                                None => std::future::pending().await, // Disable this branch when no stream
                             }
                         } => {
-                            collector.emit(value).await;
+                            if let Some(v) = value {
+                                collector.emit(v).await;
+                            } else {
+                                // Current inner flow completed, clear it and wait for next
+                                current_stream = None;
+                            }
                         }
 
-                        // Both branches exhausted
+                        // Both upstream and current stream exhausted
                         else => break,
                     }
                 }
