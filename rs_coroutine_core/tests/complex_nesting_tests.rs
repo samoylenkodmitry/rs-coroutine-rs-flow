@@ -11,6 +11,7 @@ use rs_coroutine_core::*;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Notify;
 use tokio::time::sleep;
 
 /// Test deeply nested scopes (5 levels) with cancellation propagating from root
@@ -24,9 +25,11 @@ async fn test_deeply_nested_cancellation() {
         AtomicUsize::new(0), // Level 3
         AtomicUsize::new(0), // Level 4
     ]);
+    let started = Arc::new(Notify::new());
 
     let counters_clone = Arc::clone(&counters);
     let root_clone = Arc::clone(&root);
+    let started_clone = Arc::clone(&started);
 
     let job = root.launch(async move {
         counters_clone[0].fetch_add(1, Ordering::SeqCst);
@@ -53,6 +56,9 @@ async fn test_deeply_nested_cancellation() {
                                 let level4_result = root_3
                                     .with_dispatcher(Dispatchers::io(), async move {
                                         c4[4].fetch_add(1, Ordering::SeqCst);
+
+                                        // Signal deepest level started
+                                        started_clone.notify_one();
 
                                         // Deepest level - simulate work with cooperative cancellation
                                         for _ in 0..10 {
@@ -90,8 +96,8 @@ async fn test_deeply_nested_cancellation() {
         assert!(level1_result.is_err() || level1_result.unwrap().is_err());
     });
 
-    // Let all levels start
-    sleep(Duration::from_millis(10)).await;
+    // Wait for deepest level to start (deterministic)
+    started.notified().await;
 
     // Cancel from root - should propagate to all 5 levels
     root.cancel();
