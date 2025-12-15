@@ -118,7 +118,7 @@ impl CoroutineScope {
         let cancel_token = child_scope.cancel_token.clone();
         let job = child_scope.job.clone();
 
-        let mut join_handle = dispatcher.spawn(async move {
+        let join_handle = dispatcher.spawn(async move {
             // Create guard FIRST - ensures job.complete() is called even on panic
             let _guard = JobCompletionGuard::new(job);
 
@@ -143,24 +143,25 @@ impl CoroutineScope {
         });
 
         // Race between parent cancellation and task completion (including panics)
-        // biased + cancellation-first = deterministic: once parent cancelled, always return Cancelled
-        let parent_cancelled = tokio::select! {
-            biased;
-            _ = self.cancel_token.cancelled() => true,
-            _ = &mut join_handle => false,
-        };
+        // CRITICAL: Must await join_handle exactly ONCE (no double-polling)
 
-        // CRITICAL: Always await join_handle to avoid orphaned tasks
-        // This ensures:
-        // 1. Task completes (not orphaned in scope tree)
-        // 2. Panics are detected (proper cleanup)
-        // 3. No dangling JoinHandle references
-        let join_result = join_handle.await;
+        // Pin the join_handle so we can poll it in select! without moving
+        tokio::pin!(join_handle);
+
+        let join_result = tokio::select! {
+            biased;
+            _ = self.cancel_token.cancelled() => {
+                // Parent cancelled - still await to avoid orphaning task
+                (&mut join_handle).await
+            }
+            res = &mut join_handle => res,
+        };
 
         match join_result {
             Ok(()) => {
-                if parent_cancelled {
-                    // Parent cancelled, but task completed - return Cancelled
+                // Task completed - check if it was due to cancellation
+                if self.cancel_token.is_cancelled() {
+                    // Parent was cancelled at some point - return Cancelled
                     Err(TaskError::Cancelled)
                 } else {
                     // Task completed normally, get result from oneshot
@@ -269,34 +270,48 @@ impl<T> Deferred<T> {
     /// - `TaskError::Aborted` if the task is dropped before completion
     pub async fn await_result(self) -> Result<T, TaskError> {
         // Race between parent cancellation and task completion (including panics)
-        // biased + cancellation-first = deterministic: once parent cancelled, always return Cancelled
-        tokio::select! {
+        // CRITICAL: Must await join_handle exactly ONCE (no double-polling, no detach)
+
+        // Extract and pin the join_handle so we can poll it in select! without moving
+        let join_handle = self.join_handle;
+        tokio::pin!(join_handle);
+
+        let join_result = tokio::select! {
             biased;
-            _ = self.parent_cancel_token.cancelled() => Err(TaskError::Cancelled),
-            join_result = self.join_handle => {
-                match join_result {
-                    Ok(()) => {
-                        // Task completed normally, get result from oneshot
-                        // RecvError only occurs if sender dropped without sending (runtime abort/shutdown)
-                        self.rx.await.unwrap_or(Err(TaskError::Aborted))
-                    }
-                    Err(join_err) if join_err.is_panic() => {
-                        // Task panicked - use JoinError to get panic info (proper Tokio idiom)
-                        let panic_payload = join_err.into_panic();
-                        let panic_msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
-                            s.to_string()
-                        } else if let Some(s) = panic_payload.downcast_ref::<String>() {
-                            s.clone()
-                        } else {
-                            "panic with non-string payload".to_string()
-                        };
-                        Err(TaskError::Panicked(panic_msg))
-                    }
-                    Err(_) => {
-                        // Task cancelled by runtime shutdown
-                        Err(TaskError::Aborted)
-                    }
+            _ = self.parent_cancel_token.cancelled() => {
+                // Parent cancelled - still await to avoid orphaning/detaching task
+                (&mut join_handle).await
+            }
+            res = &mut join_handle => res,
+        };
+
+        match join_result {
+            Ok(()) => {
+                // Task completed - check if it was due to cancellation
+                if self.parent_cancel_token.is_cancelled() {
+                    // Parent was cancelled at some point - return Cancelled
+                    Err(TaskError::Cancelled)
+                } else {
+                    // Task completed normally, get result from oneshot
+                    // RecvError only occurs if sender dropped without sending (runtime abort/shutdown)
+                    self.rx.await.unwrap_or(Err(TaskError::Aborted))
                 }
+            }
+            Err(join_err) if join_err.is_panic() => {
+                // Task panicked - propagate panic regardless of parent cancellation
+                let panic_payload = join_err.into_panic();
+                let panic_msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "panic with non-string payload".to_string()
+                };
+                Err(TaskError::Panicked(panic_msg))
+            }
+            Err(_) => {
+                // Task cancelled by runtime shutdown
+                Err(TaskError::Aborted)
             }
         }
     }

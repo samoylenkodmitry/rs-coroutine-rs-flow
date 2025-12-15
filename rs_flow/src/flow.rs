@@ -116,21 +116,24 @@ pub struct FlowStream<T> {
 
 /// Guard for FlowStream background task
 ///
-/// This wraps a ScopeAwareHandle and provides abort-on-drop for unscoped tasks
-/// while relying on scope cancellation for scoped tasks.
-struct FlowStreamGuard(crate::internal_utils::ScopeAwareHandle);
+/// CRITICAL: This MUST cancel the collection task when stream is dropped.
+/// Essential for flat_map_latest which switches flows - without cancel, old flows keep running.
+struct FlowStreamGuard(Option<crate::internal_utils::ScopeAwareHandle>);
 
 impl Drop for FlowStreamGuard {
     fn drop(&mut self) {
-        // For scoped tasks, scope cancellation will handle cleanup cooperatively
-        // For unscoped tasks (fallback), we need to abort since there's no scope to cancel
-        match &self.0 {
-            crate::internal_utils::ScopeAwareHandle::Scoped(_) => {
-                // Scoped task will be cancelled via scope - no action needed here
-            }
-            crate::internal_utils::ScopeAwareHandle::Unscoped(handle) => {
-                // Unscoped fallback - abort the task since there's no scope to signal
-                handle.abort();
+        // CRITICAL: Must cancel the collection task when stream is dropped
+        // Without this, flat_map_latest leaks 999 tasks for 1000 items
+        if let Some(handle) = self.0.take() {
+            match handle {
+                crate::internal_utils::ScopeAwareHandle::Scoped(job) => {
+                    // Scoped task - cancel the job so it stops immediately
+                    job.cancel();
+                }
+                crate::internal_utils::ScopeAwareHandle::Unscoped(handle) => {
+                    // Unscoped fallback - abort the task
+                    handle.abort();
+                }
             }
         }
     }
@@ -142,15 +145,29 @@ where
 {
     fn new(flow: Flow<T>, buffer_size: usize) -> Self {
         use crate::internal_utils::spawn_in_scope;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
         let (tx, rx) = mpsc::channel(buffer_size);
+        let stopped = Arc::new(AtomicBool::new(false));
 
         // Spawn collection task in current scope if available
+        let stopped_clone = Arc::clone(&stopped);
         let task = spawn_in_scope(async move {
             flow.collect(move |value| {
                 let tx = tx.clone();
+                let stopped = Arc::clone(&stopped_clone);
                 async move {
-                    // Send value, ignoring errors (receiver dropped means stream dropped)
-                    let _ = tx.send(value).await;
+                    // CRITICAL: Stop immediately if receiver dropped
+                    // Without this check, we busy-loop burning CPU after stream is dropped
+                    if stopped.load(Ordering::Relaxed) {
+                        return;
+                    }
+
+                    // Try to send - if it fails, receiver is dropped, stop collecting
+                    if tx.send(value).await.is_err() {
+                        stopped.store(true, Ordering::Relaxed);
+                    }
                 }
             })
             .await;
@@ -158,7 +175,7 @@ where
 
         Self {
             rx,
-            _task: FlowStreamGuard(task),
+            _task: FlowStreamGuard(Some(task)),
         }
     }
 }

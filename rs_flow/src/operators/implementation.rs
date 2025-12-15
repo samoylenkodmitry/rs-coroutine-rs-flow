@@ -122,19 +122,32 @@ where
 
     fn buffer(self, capacity: usize) -> Flow<T> {
         use crate::internal_utils::spawn_in_scope;
+        use std::sync::atomic::{AtomicBool, Ordering};
 
         Flow::new(move |collector| {
             let upstream = self.clone();
             async move {
                 let (tx, mut rx) = mpsc::channel(capacity);
+                let stopped = Arc::new(AtomicBool::new(false));
 
                 // Spawn upstream collection in current scope if available
+                let stopped_clone = Arc::clone(&stopped);
                 let _producer = spawn_in_scope(async move {
                     upstream
                         .collect(move |value| {
                             let tx = tx.clone();
+                            let stopped = Arc::clone(&stopped_clone);
                             async move {
-                                let _ = tx.send(value).await;
+                                // CRITICAL: Stop immediately if receiver dropped
+                                // Without this check, we busy-loop burning CPU
+                                if stopped.load(Ordering::Relaxed) {
+                                    return;
+                                }
+
+                                // Try to send - if it fails, receiver is dropped, stop collecting
+                                if tx.send(value).await.is_err() {
+                                    stopped.store(true, Ordering::Relaxed);
+                                }
                             }
                         })
                         .await;
@@ -144,6 +157,7 @@ where
                 while let Some(value) = rx.recv().await {
                     // Check cancellation before emitting (lenient: no-op if not in scope)
                     if check_cancellation_lenient().is_err() {
+                        stopped.store(true, Ordering::Relaxed);
                         drop(rx);
                         // Producer task will be cancelled via scope cancellation
                         return;
