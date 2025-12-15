@@ -3,10 +3,23 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 /// Type-erased join handle that can be awaited to detect panics
+///
+/// **Note:** This is explicitly a Tokio `JoinHandle`. This library is **tokio-only**
+/// and does not abstract over other async runtimes. The JoinHandle is required for
+/// proper panic detection using `JoinError::is_panic()`.
 pub type BoxedJoinHandle = tokio::task::JoinHandle<()>;
 
 /// Minimal executor trait for spawning futures
-/// Returns a JoinHandle to support proper panic detection
+///
+/// **Note:** This trait is **tokio-specific** and cannot be implemented for other runtimes.
+/// The return type `BoxedJoinHandle` is `tokio::task::JoinHandle<()>`, which is required
+/// for proper panic detection. This library makes no attempt to abstract over async runtimes.
+///
+/// The trait exists primarily for:
+/// - Testing/mocking purposes
+/// - Potential future runtime configuration (e.g., different tokio runtime flavors)
+///
+/// But it is **not** a generic executor abstraction.
 pub trait Executor: Send + Sync + 'static {
     fn spawn(&self, fut: Pin<Box<dyn Future<Output = ()> + Send + 'static>>) -> BoxedJoinHandle;
 }

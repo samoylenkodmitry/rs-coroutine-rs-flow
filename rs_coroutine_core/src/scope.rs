@@ -71,10 +71,18 @@ impl CoroutineScope {
                         return;
                     }
 
-                    // Run the future to completion
-                    // Cancellation is cooperative - propagates through suspension points
-                    // (with_dispatcher, async_task, check_cancellation, etc.)
-                    fut.await;
+                    // CRITICAL: Race the future against cancellation
+                    // biased + cancellation-first = deterministic cancellation semantics
+                    // This ensures scope.cancel() actually stops the future
+                    tokio::select! {
+                        biased;
+                        _ = cancel_token.cancelled() => {
+                            // Scope was cancelled - stop execution immediately
+                        }
+                        _ = fut => {
+                            // Future completed normally
+                        }
+                    }
                 })
                 .await;
             // Guard's Drop will call job.complete() here
