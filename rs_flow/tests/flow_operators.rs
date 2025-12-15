@@ -91,3 +91,80 @@ async fn flat_map_latest_switches_to_new_flows() {
         );
     }
 }
+
+#[tokio::test]
+async fn flat_map_latest_cancels_previous_flow() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::time::{sleep, Duration};
+
+    // Test that flat_map_latest cancels the previous inner flow when a new one arrives
+    let upstream = flow(|collector| async move {
+        collector.emit(1).await;
+        sleep(Duration::from_millis(10)).await; // Give first flow time to start
+        collector.emit(2).await;
+    });
+
+    let first_flow_aborted = Arc::new(AtomicBool::new(false));
+    let first_flow_aborted_clone = Arc::clone(&first_flow_aborted);
+
+    let results = Arc::new(Mutex::new(Vec::new()));
+    let results_clone = Arc::clone(&results);
+
+    upstream
+        .flat_map_latest(move |x| {
+            let flag = Arc::clone(&first_flow_aborted_clone);
+            async move {
+                if x == 1 {
+                    // First inner flow - should be cancelled when second arrives
+                    flow(move |collector| {
+                        let flag = flag.clone();
+                        async move {
+                            collector.emit(100).await;
+                            // Long sleep - should be interrupted by cancellation
+                            sleep(Duration::from_millis(100)).await;
+                            // This should not execute because flow is aborted
+                            flag.store(true, Ordering::SeqCst);
+                            collector.emit(101).await;
+                        }
+                    })
+                } else {
+                    // Second inner flow - completes normally
+                    flow_of!(200, 201)
+                }
+            }
+        })
+        .collect(move |value| {
+            let results = Arc::clone(&results_clone);
+            async move {
+                results.lock().await.push(value);
+            }
+        })
+        .await;
+
+    let final_values = results.lock().await.clone();
+
+    // Should contain first value from first flow (100)
+    // But NOT 101 (because first flow was cancelled before completing)
+    // Should contain both values from second flow (200, 201)
+    assert!(
+        final_values.contains(&100),
+        "Should have first value from first flow: {:?}",
+        final_values
+    );
+    assert!(
+        final_values.contains(&200),
+        "Should have first value from second flow: {:?}",
+        final_values
+    );
+    assert!(
+        final_values.contains(&201),
+        "Should have second value from second flow: {:?}",
+        final_values
+    );
+
+    // First flow should have been aborted before setting the flag
+    assert!(
+        !first_flow_aborted.load(Ordering::SeqCst),
+        "First flow should have been aborted before completion"
+    );
+}

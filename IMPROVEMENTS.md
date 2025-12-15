@@ -271,6 +271,64 @@ impl Drop for AbortOnDrop<T> {
 - ✅ Automatic cleanup on panic or early return
 - ✅ Proper resource management
 
+### 9. Stream Support for Flow
+
+**Problem:** Flow is callback-based (push), making it impossible to use with `tokio::select!` to multiplex between flows. This forced `flat_map_latest` to spawn a task per element.
+
+**Solution:** Added Stream adapter to convert Flow to poll-based Stream:
+
+```rust
+// Core API
+impl<T> Flow<T> {
+    /// Convert to Stream with bounded buffer
+    pub fn to_stream(self, buffer_size: usize) -> FlowStream<T>
+}
+
+// FlowStream implements futures::stream::Stream
+pub struct FlowStream<T> {
+    rx: mpsc::Receiver<T>,
+    _task: AbortOnDrop<()>,  // Auto-cleanup on drop
+}
+
+impl<T> Stream for FlowStream<T> {
+    type Item = T;
+    fn poll_next(...) -> Poll<Option<T>>
+}
+```
+
+**Architecture:**
+- Spawns background task to collect from Flow
+- Uses bounded channel (buffer_size) for backpressure
+- AbortOnDrop ensures cleanup when Stream dropped
+- Converts callback-based (push) to poll-based (pull)
+
+**Use cases:**
+```rust
+// 1. Using with select! (flat_map_latest)
+loop {
+    tokio::select! {
+        biased;
+        Some(new_flow) = rx.recv() => {
+            current_stream = new_flow.to_stream(16);
+        }
+        Some(value) = current_stream.next() => {
+            emit(value).await;
+        }
+    }
+}
+
+// 2. Using with futures combinators
+use futures::StreamExt;
+let stream = flow.to_stream(10);
+let doubled = stream.map(|x| x * 2);
+```
+
+**Impact:**
+- ✅ Enables `flat_map_latest` without task-per-element
+- ✅ O(1) concurrent tasks instead of O(N) spawns
+- ✅ Interop with tokio::select! and futures ecosystem
+- ✅ Maintains Flow's lazy/cold semantics
+
 ### Removed APIs
 
 - ❌ `try_with_dispatcher()` - removed (use `with_dispatcher`)

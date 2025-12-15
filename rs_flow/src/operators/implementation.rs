@@ -247,12 +247,13 @@ where
                         }
 
                         // Next element from current flow (if exists)
+                        // When None, pending().await disables this branch automatically
                         value = async {
                             match current_stream.as_mut() {
                                 Some(stream) => stream.next().await,
-                                None => std::future::pending().await, // Disable this branch when no stream
+                                None => std::future::pending().await,
                             }
-                        }, if current_stream.is_some() => {
+                        } => {
                             if let Some(v) = value {
                                 collector.emit(v).await;
                             } else {
