@@ -41,54 +41,55 @@ async fn test_child_cancellation_doesnt_affect_parent() {
 #[tokio::test]
 async fn test_scope_cancellation_propagates_to_child_scopes() {
     let scope = Arc::new(CoroutineScope::new(Dispatchers::main()));
-    let child_cancelled = Arc::new(AtomicBool::new(false));
+    let work_completed = Arc::new(AtomicBool::new(false));
     let started = Arc::new(Notify::new());
 
     // Create notified future BEFORE launching task (Notify requires this)
     let notified = started.notified();
 
     // Launch a task that uses with_dispatcher (creates child scope)
-    let child_cancelled_clone = Arc::clone(&child_cancelled);
+    let work_clone = Arc::clone(&work_completed);
     let scope_clone = Arc::clone(&scope);
     let started_clone = Arc::clone(&started);
     let job = scope.launch(async move {
-        let flag = Arc::clone(&child_cancelled_clone);
-        let result = scope_clone
+        let flag = Arc::clone(&work_clone);
+        scope_clone
             .with_dispatcher(Dispatchers::io(), async move {
                 // Signal that we've started
                 started_clone.notify_one();
 
-                // Simulate some work that checks for cancellation
-                for _ in 0..10 {
-                    sleep(Duration::from_millis(10)).await;
-                    // Check if child scope can see parent cancellation
-                    if let Ok(current) = CURRENT_SCOPE.try_with(|s| s.is_cancelled()) {
-                        if current {
-                            flag.store(true, Ordering::SeqCst);
-                            return;
-                        }
-                    }
-                }
+                // Simulate long-running work that should be interrupted
+                // With forced cancellation, this should never complete
+                sleep(Duration::from_millis(200)).await;
+                flag.store(true, Ordering::SeqCst);
             })
-            .await;
-
-        // If we got Err(CancellationError), that also counts as seeing cancellation
-        if result.is_err() {
-            child_cancelled_clone.store(true, Ordering::SeqCst);
-        }
+            .await
+            .ok(); // Ignore cancellation error
     });
 
     // Wait for task to start (deterministic)
     notified.await;
 
+    // Give it a tiny bit of time to ensure it's in the sleep
+    sleep(Duration::from_millis(10)).await;
+
     // Cancel the scope
     scope.cancel();
 
-    // Wait for job to complete
-    job.join().await;
+    // Wait for job to complete - should complete quickly due to forced cancellation
+    let join_result = tokio::time::timeout(Duration::from_millis(100), job.join()).await;
 
-    // The child scope should have seen the parent cancellation
-    assert!(child_cancelled.load(Ordering::SeqCst));
+    // Job should complete within timeout (forced cancellation is immediate)
+    assert!(
+        join_result.is_ok(),
+        "Job should complete quickly with forced cancellation"
+    );
+
+    // Work should NOT have completed (task was interrupted)
+    assert!(
+        !work_completed.load(Ordering::SeqCst),
+        "Work should be interrupted by forced cancellation"
+    );
 }
 
 #[tokio::test]
@@ -207,65 +208,62 @@ async fn test_async_task_respects_scope_cancellation() {
 #[tokio::test]
 async fn test_multiple_nested_scopes() {
     let root = Arc::new(CoroutineScope::new(Dispatchers::main()));
-    let deepest_saw_cancellation = Arc::new(AtomicBool::new(false));
+    let work_completed = Arc::new(AtomicBool::new(false));
     let started = Arc::new(Notify::new());
 
     // Create notified future BEFORE launching task (Notify requires this)
     let notified = started.notified();
 
-    let flag_clone = Arc::clone(&deepest_saw_cancellation);
+    let work_clone = Arc::clone(&work_completed);
     let root_clone = Arc::clone(&root);
     let started_clone = Arc::clone(&started);
 
     let job = root.launch(async move {
         let root_clone2 = root_clone.clone();
-        let flag_inner = Arc::clone(&flag_clone);
-        let flag_mid = Arc::clone(&flag_clone);
-        let result = root_clone
+        let flag = Arc::clone(&work_clone);
+        root_clone
             .with_dispatcher(Dispatchers::io(), async move {
-                let flag_innermost = Arc::clone(&flag_inner);
-                let result2 = root_clone2
+                root_clone2
                     .with_dispatcher(Dispatchers::io(), async move {
                         // Signal we've started
                         started_clone.notify_one();
 
-                        // Simulate work with cooperative cancellation
-                        for _ in 0..10 {
-                            sleep(Duration::from_millis(10)).await;
-                            if let Ok(current) = CURRENT_SCOPE.try_with(|s| s.is_cancelled()) {
-                                if current {
-                                    flag_innermost.store(true, Ordering::SeqCst);
-                                    return;
-                                }
-                            }
-                        }
+                        // Simulate long-running nested work that should be interrupted
+                        // With forced cancellation through the entire scope tree,
+                        // this should never complete
+                        sleep(Duration::from_millis(200)).await;
+                        flag.store(true, Ordering::SeqCst);
                     })
-                    .await;
-
-                // If inner was cancelled, that counts too
-                if result2.is_err() {
-                    flag_inner.store(true, Ordering::SeqCst);
-                }
+                    .await
+                    .ok(); // Ignore cancellation error
             })
-            .await;
-
-        // If outer was cancelled, that counts too
-        if result.is_err() {
-            flag_mid.store(true, Ordering::SeqCst);
-        }
+            .await
+            .ok(); // Ignore cancellation error
     });
 
     // Wait for task to start (deterministic)
     notified.await;
 
+    // Give it a tiny bit of time to ensure it's in the sleep
+    sleep(Duration::from_millis(10)).await;
+
     // Cancel root
     root.cancel();
 
-    // Wait for job to complete - no hacky sleep needed!
-    job.join().await;
+    // Wait for job to complete - should complete quickly due to forced cancellation
+    let join_result = tokio::time::timeout(Duration::from_millis(100), job.join()).await;
 
-    // The deepest nested scope should have seen the cancellation
-    assert!(deepest_saw_cancellation.load(Ordering::SeqCst));
+    // Job should complete within timeout (forced cancellation propagates through scope tree)
+    assert!(
+        join_result.is_ok(),
+        "Nested job should complete quickly with forced cancellation"
+    );
+
+    // Work should NOT have completed (task was interrupted at any nested level)
+    assert!(
+        !work_completed.load(Ordering::SeqCst),
+        "Nested work should be interrupted by forced cancellation"
+    );
 }
 
 #[tokio::test]
