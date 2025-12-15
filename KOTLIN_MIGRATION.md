@@ -163,7 +163,7 @@ suspend fun processItems(items: List<Int>) {
 ```rust
 async fn process_items(items: Vec<i32>) {
     for item in items {
-        ensure_active!();
+        check_cancellation()?;  // Or use check_cancelled!() macro
         process(item).await;
     }
 }
@@ -619,7 +619,7 @@ if check_cancellation().is_err() {
 - [ ] Replace `flow { emit() }` with `flow! { emit!() }`
 - [ ] Replace `launch { }` with `launch! { }`
 - [ ] Replace `isActive` with `check_cancellation().is_ok()`
-- [ ] Replace `ensureActive()` with `check_cancelled!()` or `ensure_active!()`
+- [ ] Replace `ensureActive()` with `check_cancellation()` or `check_cancelled!()` macro
 - [ ] Add `Arc` wrappers for shared state
 - [ ] Add `.await` after async operations
 - [ ] Use `_sync` variants for synchronous operations
