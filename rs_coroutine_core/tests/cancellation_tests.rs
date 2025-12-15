@@ -296,3 +296,31 @@ async fn test_check_cancellation_function() {
     // Should not have completed
     assert!(!result.load(Ordering::SeqCst));
 }
+
+#[tokio::test]
+async fn test_check_cancelled_macro_with_result() {
+    use rs_coroutine_core::{check_cancelled, CancellationError};
+
+    async fn work_that_returns_result(should_cancel: bool) -> Result<i32, CancellationError> {
+        if should_cancel {
+            check_cancelled!(Result);
+        }
+        Ok(42)
+    }
+
+    // Test non-cancelled case
+    let result = work_that_returns_result(false).await;
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), 42);
+
+    // Test with cancellation via scope
+    let scope = Arc::new(CoroutineScope::new(Dispatchers::main()));
+    let job = scope.launch(async move {
+        let result = work_that_returns_result(false).await;
+        assert!(result.is_ok());
+    });
+
+    // Cancel scope before work completes
+    scope.cancel();
+    job.join().await;
+}

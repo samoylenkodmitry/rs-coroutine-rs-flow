@@ -407,16 +407,31 @@ pub async fn yield_now() {
 /// Macro to check if the current coroutine is cancelled and return early if so
 /// Similar to Kotlin's ensureActive()
 ///
-/// # Example
+/// # Usage
+///
+/// For functions returning `()`:
 /// ```ignore
 /// check_cancelled!();
 /// // continues if not cancelled, returns () if cancelled
 /// ```
+///
+/// For functions returning `Result<T, E>` where `E: From<CancellationError>`:
+/// ```ignore
+/// check_cancelled!(Result);
+/// // continues if not cancelled, returns Err(CancellationError.into()) if cancelled
+/// ```
 #[macro_export]
 macro_rules! check_cancelled {
+    // For -> () functions
     () => {
         if let Err(_) = $crate::check_cancellation() {
             return;
+        }
+    };
+    // For -> Result<T, E> functions where E: From<CancellationError>
+    (Result) => {
+        if let Err(e) = $crate::check_cancellation() {
+            return Err(e.into());
         }
     };
 }
@@ -424,15 +439,27 @@ macro_rules! check_cancelled {
 /// Macro to yield execution and check for cancellation
 /// This combines yield_now() with cancellation checking
 ///
-/// # Example
+/// # Usage
+///
+/// For functions returning `()`:
 /// ```ignore
 /// yield_and_check!();
 /// // yields control and returns () if cancelled
+/// ```
+///
+/// For functions returning `Result<T, E>`:
+/// ```ignore
+/// yield_and_check!(Result);
+/// // yields control and returns Err(CancellationError.into()) if cancelled
 /// ```
 #[macro_export]
 macro_rules! yield_and_check {
     () => {
         $crate::yield_now().await;
         $crate::check_cancelled!();
+    };
+    (Result) => {
+        $crate::yield_now().await;
+        $crate::check_cancelled!(Result);
     };
 }
