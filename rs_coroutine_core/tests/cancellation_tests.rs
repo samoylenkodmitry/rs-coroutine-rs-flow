@@ -2,6 +2,7 @@ use rs_coroutine_core::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Notify;
 use tokio::time::sleep;
 
 #[tokio::test]
@@ -41,14 +42,19 @@ async fn test_child_cancellation_doesnt_affect_parent() {
 async fn test_scope_cancellation_propagates_to_child_scopes() {
     let scope = Arc::new(CoroutineScope::new(Dispatchers::main()));
     let child_cancelled = Arc::new(AtomicBool::new(false));
+    let started = Arc::new(Notify::new());
 
     // Launch a task that uses with_dispatcher (creates child scope)
     let child_cancelled_clone = Arc::clone(&child_cancelled);
     let scope_clone = Arc::clone(&scope);
+    let started_clone = Arc::clone(&started);
     let job = scope.launch(async move {
         let flag = Arc::clone(&child_cancelled_clone);
         let result = scope_clone
             .with_dispatcher(Dispatchers::io(), async move {
+                // Signal that we've started
+                started_clone.notify_one();
+
                 // Simulate some work that checks for cancellation
                 for _ in 0..10 {
                     sleep(Duration::from_millis(10)).await;
@@ -69,13 +75,13 @@ async fn test_scope_cancellation_propagates_to_child_scopes() {
         }
     });
 
-    // Let it start
-    sleep(Duration::from_millis(10)).await;
+    // Wait for task to start (deterministic)
+    started.notified().await;
 
     // Cancel the scope
     scope.cancel();
 
-    // Wait for job to complete - no hacky sleep needed!
+    // Wait for job to complete
     job.join().await;
 
     // The child scope should have seen the parent cancellation
@@ -86,15 +92,18 @@ async fn test_scope_cancellation_propagates_to_child_scopes() {
 async fn test_cancel_token_cancelled_await() {
     let token = CancelToken::new();
     let token_clone = token.clone();
+    let started = Arc::new(Notify::new());
+    let started_clone = Arc::clone(&started);
 
     // Spawn a task that waits for cancellation
     let handle = tokio::spawn(async move {
+        started_clone.notify_one();
         token_clone.cancelled().await;
         "cancelled"
     });
 
-    // Give it a moment
-    sleep(Duration::from_millis(10)).await;
+    // Wait for task to start (deterministic)
+    started.notified().await;
 
     // Cancel the token
     token.cancel();
@@ -113,14 +122,18 @@ async fn test_hierarchical_cancel_token_await() {
     let parent = CancelToken::new();
     let child = parent.child();
     let child_clone = child.clone();
+    let started = Arc::new(Notify::new());
+    let started_clone = Arc::clone(&started);
 
     // Wait on child
     let handle = tokio::spawn(async move {
+        started_clone.notify_one();
         child_clone.cancelled().await;
         "done"
     });
 
-    sleep(Duration::from_millis(10)).await;
+    // Wait for task to start (deterministic)
+    started.notified().await;
 
     // Cancel parent
     parent.cancel();
@@ -154,19 +167,19 @@ async fn test_job_handle_child_cancellation() {
 #[tokio::test]
 async fn test_async_task_respects_scope_cancellation() {
     let scope = Arc::new(CoroutineScope::new(Dispatchers::main()));
-    let started = Arc::new(AtomicBool::new(false));
+    let started = Arc::new(Notify::new());
 
     let started_clone = Arc::clone(&started);
 
     let deferred = scope.async_task(Dispatchers::io(), async move {
-        started_clone.store(true, Ordering::SeqCst);
+        started_clone.notify_one();
         // Simulate a long-running task that would normally complete
         sleep(Duration::from_millis(100)).await;
         42
     });
 
-    // Let it start
-    sleep(Duration::from_millis(20)).await;
+    // Wait for task to start (deterministic)
+    started.notified().await;
 
     // Cancel scope
     scope.cancel();
@@ -183,9 +196,11 @@ async fn test_async_task_respects_scope_cancellation() {
 async fn test_multiple_nested_scopes() {
     let root = Arc::new(CoroutineScope::new(Dispatchers::main()));
     let deepest_saw_cancellation = Arc::new(AtomicBool::new(false));
+    let started = Arc::new(Notify::new());
 
     let flag_clone = Arc::clone(&deepest_saw_cancellation);
     let root_clone = Arc::clone(&root);
+    let started_clone = Arc::clone(&started);
 
     let job = root.launch(async move {
         let root_clone2 = root_clone.clone();
@@ -196,6 +211,9 @@ async fn test_multiple_nested_scopes() {
                 let flag_innermost = Arc::clone(&flag_inner);
                 let result2 = root_clone2
                     .with_dispatcher(Dispatchers::io(), async move {
+                        // Signal we've started
+                        started_clone.notify_one();
+
                         // Simulate work with cooperative cancellation
                         for _ in 0..10 {
                             sleep(Duration::from_millis(10)).await;
@@ -222,8 +240,8 @@ async fn test_multiple_nested_scopes() {
         }
     });
 
-    // Let it start
-    sleep(Duration::from_millis(10)).await;
+    // Wait for task to start (deterministic)
+    started.notified().await;
 
     // Cancel root
     root.cancel();
