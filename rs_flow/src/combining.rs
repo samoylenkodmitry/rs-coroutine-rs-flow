@@ -82,6 +82,7 @@ where
         T: Clone,
         F: Fn(T, U) -> R + Send + Sync + 'static,
     {
+        use crate::internal_utils::spawn_in_scope;
         let transform = Arc::new(transform);
 
         Flow::new(move |collector| {
@@ -95,11 +96,11 @@ where
 
                 let (tx, mut rx) = mpsc::channel::<(Option<T>, Option<U>)>(16);
 
-                // Spawn task to collect from first flow
+                // Spawn task to collect from first flow in current scope
                 let tx1 = tx.clone();
                 let latest1_clone = Arc::clone(&latest1);
                 let latest2_clone = Arc::clone(&latest2);
-                let task1 = tokio::spawn(async move {
+                let task1 = spawn_in_scope(async move {
                     upstream1
                         .collect(move |value| {
                             let tx = tx1.clone();
@@ -114,11 +115,11 @@ where
                         .await;
                 });
 
-                // Spawn task to collect from second flow
+                // Spawn task to collect from second flow in current scope
                 let tx2 = tx.clone();
                 let latest1_clone = Arc::clone(&latest1);
                 let latest2_clone = Arc::clone(&latest2);
-                let task2 = tokio::spawn(async move {
+                let task2 = spawn_in_scope(async move {
                     upstream2
                         .collect(move |value| {
                             let tx = tx2.clone();
@@ -143,8 +144,8 @@ where
                     }
                 }
 
-                let _ = task1.await;
-                let _ = task2.await;
+                task1.join().await;
+                task2.join().await;
             }
         })
     }
@@ -155,6 +156,7 @@ where
         R: Send + 'static,
         F: Fn(T, U) -> R + Send + Sync + 'static,
     {
+        use crate::internal_utils::spawn_in_scope;
         let transform = Arc::new(transform);
 
         Flow::new(move |collector| {
@@ -166,8 +168,8 @@ where
                 let (tx1, mut rx1) = mpsc::channel::<T>(16);
                 let (tx2, mut rx2) = mpsc::channel::<U>(16);
 
-                // Spawn task to collect from first flow
-                let task1 = tokio::spawn(async move {
+                // Spawn task to collect from first flow in current scope
+                let task1 = spawn_in_scope(async move {
                     upstream1
                         .collect(move |value| {
                             let tx = tx1.clone();
@@ -178,8 +180,8 @@ where
                         .await;
                 });
 
-                // Spawn task to collect from second flow
-                let task2 = tokio::spawn(async move {
+                // Spawn task to collect from second flow in current scope
+                let task2 = spawn_in_scope(async move {
                     upstream2
                         .collect(move |value| {
                             let tx = tx2.clone();
@@ -195,8 +197,8 @@ where
                     collector.emit(transform(v1, v2)).await;
                 }
 
-                let _ = task1.await;
-                let _ = task2.await;
+                task1.join().await;
+                task2.join().await;
             }
         })
     }
@@ -206,6 +208,7 @@ where
         U: Send + 'static,
         T: Clone,
     {
+        use crate::internal_utils::spawn_in_scope;
         Flow::new(move |collector| {
             let upstream = self.clone();
             let sampler = sampler.clone();
@@ -214,9 +217,9 @@ where
                 let latest: Arc<Mutex<Option<T>>> = Arc::new(Mutex::new(None));
                 let (tx, mut rx) = mpsc::channel::<()>(16);
 
-                // Spawn task to collect from data flow
+                // Spawn task to collect from data flow in current scope
                 let latest_clone = Arc::clone(&latest);
-                let task1 = tokio::spawn(async move {
+                let task1 = spawn_in_scope(async move {
                     upstream
                         .collect(move |value| {
                             let latest = Arc::clone(&latest_clone);
@@ -227,8 +230,8 @@ where
                         .await;
                 });
 
-                // Spawn task to collect from sampler flow
-                let task2 = tokio::spawn(async move {
+                // Spawn task to collect from sampler flow in current scope
+                let task2 = spawn_in_scope(async move {
                     sampler
                         .collect(move |_| {
                             let tx = tx.clone();
@@ -246,8 +249,8 @@ where
                     }
                 }
 
-                let _ = task1.await;
-                let _ = task2.await;
+                task1.join().await;
+                task2.join().await;
             }
         })
     }
@@ -322,18 +325,19 @@ pub fn merge<T>(flows: Vec<Flow<T>>) -> Flow<T>
 where
     T: Send + 'static,
 {
+    use crate::internal_utils::spawn_in_scope;
     Flow::new(move |collector| {
         let flows = flows.clone();
 
         async move {
             let (tx, mut rx) = mpsc::channel::<T>(16);
 
-            // Spawn a task for each flow
+            // Spawn a task for each flow in current scope
             let tasks: Vec<_> = flows
                 .into_iter()
                 .map(|flow| {
                     let tx = tx.clone();
-                    tokio::spawn(async move {
+                    spawn_in_scope(async move {
                         flow.collect(move |value| {
                             let tx = tx.clone();
                             async move {
@@ -355,7 +359,7 @@ where
 
             // Wait for all tasks
             for task in tasks {
-                let _ = task.await;
+                task.join().await;
             }
         }
     })

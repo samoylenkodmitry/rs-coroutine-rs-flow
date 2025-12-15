@@ -92,6 +92,7 @@ where
     F: Fn(mpsc::Sender<T>) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = ()> + Send + 'static,
 {
+    use crate::internal_utils::spawn_in_scope;
     let builder = Arc::new(builder);
     Flow::new(move |collector| {
         let builder = Arc::clone(&builder);
@@ -99,13 +100,13 @@ where
             let (tx, mut rx) = mpsc::channel(16);
 
             let fut = builder(tx);
-            let producer = tokio::spawn(fut);
+            let producer = spawn_in_scope(fut);
 
             while let Some(value) = rx.recv().await {
                 collector.emit(value).await;
             }
 
-            let _ = producer.await;
+            producer.join().await;
         }
     })
 }

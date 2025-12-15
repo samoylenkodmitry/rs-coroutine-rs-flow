@@ -69,7 +69,7 @@ where
     }
 
     fn take(self, count: usize) -> Flow<T> {
-        use rs_coroutine_core::AbortOnDrop;
+        use crate::internal_utils::spawn_in_scope;
 
         Flow::new(move |collector| {
             let upstream = self.clone();
@@ -82,24 +82,24 @@ where
                 let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let done_clone = Arc::clone(&done);
 
-                // Spawn upstream collection with abort-on-drop guard
-                let _producer = AbortOnDrop::new(tokio::spawn(async move {
+                // Spawn upstream collection in current scope if available
+                let _producer = spawn_in_scope(async move {
                     upstream
                         .collect(move |value| {
                             let tx = tx.clone();
                             let done = Arc::clone(&done_clone);
                             async move {
                                 if done.load(Ordering::SeqCst) {
-                                    // Yield to allow task cancellation
-                                    tokio::task::yield_now().await;
+                                    // Stop sending - downstream is done
                                     return;
                                 }
-                                // This will block if receiver is full, allowing abort to work
+                                // This will block if receiver is full, providing backpressure
                                 let _ = tx.send(value).await;
                             }
                         })
                         .await;
-                }));
+                })
+                .into_keep_alive();
 
                 // Receive exactly `count` values then stop
                 let mut received = 0;
@@ -113,23 +113,23 @@ where
                 }
 
                 // Signal upstream to stop
-                // Guard will abort producer on drop
                 done.store(true, Ordering::SeqCst);
                 drop(rx);
+                // Producer task will be cancelled via scope cancellation if we're in a scope
             }
         })
     }
 
     fn buffer(self, capacity: usize) -> Flow<T> {
-        use rs_coroutine_core::AbortOnDrop;
+        use crate::internal_utils::spawn_in_scope;
 
         Flow::new(move |collector| {
             let upstream = self.clone();
             async move {
                 let (tx, mut rx) = mpsc::channel(capacity);
 
-                // Spawn upstream collection with abort-on-drop guard
-                let _producer = AbortOnDrop::new(tokio::spawn(async move {
+                // Spawn upstream collection in current scope if available
+                let _producer = spawn_in_scope(async move {
                     upstream
                         .collect(move |value| {
                             let tx = tx.clone();
@@ -138,19 +138,20 @@ where
                             }
                         })
                         .await;
-                }));
+                })
+                .into_keep_alive();
 
                 while let Some(value) = rx.recv().await {
                     // Check cancellation before emitting (lenient: no-op if not in scope)
                     if check_cancellation_lenient().is_err() {
                         drop(rx);
-                        // Guard will abort producer on drop
+                        // Producer task will be cancelled via scope cancellation
                         return;
                     }
                     collector.emit(value).await;
                 }
 
-                // Producer completes naturally, guard cleans up
+                // Producer completes naturally
             }
         })
     }
@@ -187,8 +188,8 @@ where
         F: Fn(T) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Flow<U>> + Send + 'static,
     {
+        use crate::internal_utils::spawn_in_scope;
         use futures::StreamExt;
-        use rs_coroutine_core::AbortOnDrop;
 
         let f = Arc::new(f);
         Flow::new(move |collector| {
@@ -201,7 +202,7 @@ where
                 // Move tx ownership entirely into spawned task to ensure proper cleanup
                 let _producer = {
                     let tx = tx_inner;
-                    AbortOnDrop::new(tokio::spawn({
+                    spawn_in_scope({
                         let f = Arc::clone(&f);
                         async move {
                             upstream
@@ -216,7 +217,8 @@ where
                                 .await;
                             // tx (owned by callback closure) drops here, closing the channel
                         }
-                    }))
+                    })
+                    .into_keep_alive()
                 };
 
                 // Single consumer loop using select! to switch between flows

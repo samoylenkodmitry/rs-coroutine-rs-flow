@@ -118,7 +118,8 @@ where
     fn new(flow: Flow<T>, buffer_size: usize) -> Self {
         let (tx, rx) = mpsc::channel(buffer_size);
 
-        // Spawn collection task with abort-on-drop
+        // TODO: This uses unstructured tokio::spawn with AbortOnDrop
+        // Should be integrated with scoped spawning + cooperative cancellation (issue #4)
         let task = tokio::spawn(async move {
             flow.collect(move |value| {
                 let tx = tx.clone();
