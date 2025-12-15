@@ -195,24 +195,29 @@ where
             let upstream = self.clone();
             let f = Arc::clone(&f);
             async move {
-                let (tx, mut rx) = mpsc::channel::<Flow<U>>(1);
+                let (tx_inner, mut rx) = mpsc::channel::<Flow<U>>(1);
 
                 // Spawn producer task to transform upstream values to flows
-                let _producer = AbortOnDrop::new(tokio::spawn({
-                    let f = Arc::clone(&f);
-                    async move {
-                        upstream
-                            .collect(move |value| {
-                                let f = Arc::clone(&f);
-                                let tx = tx.clone();
-                                async move {
-                                    let flow = f(value).await;
-                                    let _ = tx.send(flow).await;
-                                }
-                            })
-                            .await;
-                    }
-                }));
+                // Move tx ownership entirely into spawned task to ensure proper cleanup
+                let _producer = {
+                    let tx = tx_inner;
+                    AbortOnDrop::new(tokio::spawn({
+                        let f = Arc::clone(&f);
+                        async move {
+                            upstream
+                                .collect(move |value| {
+                                    let f = Arc::clone(&f);
+                                    let tx = tx.clone();
+                                    async move {
+                                        let flow = f(value).await;
+                                        let _ = tx.send(flow).await;
+                                    }
+                                })
+                                .await;
+                            // tx (owned by callback closure) drops here, closing the channel
+                        }
+                    }))
+                };
 
                 // Single consumer loop using select! to switch between flows
                 let mut current_stream: Option<crate::FlowStream<U>> = None;
@@ -221,10 +226,24 @@ where
                     tokio::select! {
                         biased;
 
-                        // New flow arrived - switch to it
-                        Some(new_flow) = rx.recv() => {
-                            // Drop old stream (aborts its collection task)
-                            current_stream = Some(new_flow.to_stream(16));
+                        // New flow arrived - switch to it, or producer finished (None)
+                        new_flow_opt = rx.recv() => {
+                            match new_flow_opt {
+                                Some(new_flow) => {
+                                    // Drop old stream (aborts its collection task)
+                                    current_stream = Some(new_flow.to_stream(16));
+                                }
+                                None => {
+                                    // Producer is done, no more flows coming
+                                    // Finish current stream if any, then exit
+                                    if let Some(stream) = current_stream.as_mut() {
+                                        while let Some(value) = stream.next().await {
+                                            collector.emit(value).await;
+                                        }
+                                    }
+                                    break;
+                                }
+                            }
                         }
 
                         // Next element from current flow (if exists)
@@ -233,7 +252,7 @@ where
                                 Some(stream) => stream.next().await,
                                 None => std::future::pending().await, // Disable this branch when no stream
                             }
-                        } => {
+                        }, if current_stream.is_some() => {
                             if let Some(v) = value {
                                 collector.emit(v).await;
                             } else {
@@ -241,9 +260,6 @@ where
                                 current_stream = None;
                             }
                         }
-
-                        // Both upstream and current stream exhausted
-                        else => break,
                     }
                 }
 
