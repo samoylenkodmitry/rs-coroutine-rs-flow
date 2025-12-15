@@ -222,6 +222,12 @@ where
                 };
 
                 // Single consumer loop using select! to switch between flows
+                //
+                // BORROW CHECKER NOTE: The pattern `value = async { match current_stream.as_mut() ... }`
+                // is required for select! to work correctly. Alternative patterns like:
+                //   - `Some(v) = current_stream.as_mut().and_then(|s| s.next())` don't work
+                //   - Direct polling without async block fails borrow checking
+                // The async block ensures the mutable borrow is properly scoped within the select! arm.
                 let mut current_stream: Option<crate::FlowStream<U>> = None;
 
                 loop {
@@ -232,7 +238,7 @@ where
                         new_flow_opt = rx.recv() => {
                             match new_flow_opt {
                                 Some(new_flow) => {
-                                    // Drop old stream (aborts its collection task)
+                                    // Drop old stream (cooperative cancellation via scope if available)
                                     current_stream = Some(new_flow.to_stream(16));
                                 }
                                 None => {
@@ -249,6 +255,7 @@ where
                         }
 
                         // Next element from current flow (if exists)
+                        // Using async block to satisfy borrow checker requirements in select!
                         // When None, pending().await disables this branch automatically
                         value = async {
                             match current_stream.as_mut() {
