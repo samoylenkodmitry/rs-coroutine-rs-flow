@@ -77,7 +77,8 @@ dispatcher.spawn(async move {
 **Solution:** Proper error types that distinguish outcomes:
 ```rust
 /// Error type for task execution failures
-#[derive(Debug, Clone)]
+/// Note: Intentionally NOT Clone - errors are move-only to avoid expensive clones
+#[derive(Debug)]
 pub enum TaskError {
     /// Task was explicitly cancelled
     Cancelled,
@@ -91,24 +92,42 @@ pub enum TaskError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CancellationError;
 
-impl From<CancellationError> for TaskError {
-    fn from(_: CancellationError) -> Self {
-        TaskError::Cancelled
-    }
-}
+/// Additional error type for scope requirement checks
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotInScopeError;
 ```
 
-**Implementation:** Uses `tokio::spawn` + `JoinHandle` to capture panics:
+**Implementation:** Executor returns `JoinHandle` for proper panic detection:
 ```rust
-let inner_handle = tokio::spawn(CURRENT_SCOPE.scope(child_scope, fut));
+// Executor trait changed to return JoinHandle
+pub trait Executor: Send + Sync + 'static {
+    fn spawn(&self, fut: ...) -> BoxedJoinHandle;  // Returns JoinHandle!
+}
 
-match inner_handle.await {
-    Ok(task_result) => task_result,
+// Panic handling via JoinError (proper Tokio idiom)
+let join_handle = dispatcher.spawn(async move {
+    let _guard = JobCompletionGuard::new(job);
+    let result = CURRENT_SCOPE.scope(child_scope, async move {
+        tokio::select! {
+            biased;  // Deterministic!
+            _ = cancel_token.cancelled() => Err(TaskError::Cancelled),
+            res = fut => Ok(res),
+        }
+    }).await;
+    let _ = tx.send(result);
+});
+
+// Await JoinHandle to detect panics
+match join_handle.await {
+    Ok(()) => {
+        // Normal completion - get result from oneshot
+        rx.await.unwrap_or(Err(TaskError::Aborted))
+    }
     Err(join_err) if join_err.is_panic() => {
+        // Task panicked - extract message from JoinError
         let panic_msg = /* extract from payload */;
         Err(TaskError::Panicked(panic_msg))
     }
-    Err(join_err) if join_err.is_cancelled() => Err(TaskError::Cancelled),
     Err(_) => Err(TaskError::Aborted),
 }
 ```
@@ -176,10 +195,86 @@ pub async fn await_result(self) -> Result<T, CancellationError>
 pub async fn await_result(self) -> Result<T, TaskError>
 ```
 
+###6. Deterministic Select Semantics
+
+**Problem:** `tokio::select!` is non-deterministic by default - if both branches ready, random winner.
+
+**Solution:** All select blocks now use `biased` with cancellation-first:
+```rust
+tokio::select! {
+    biased;  // Deterministic ordering
+    _ = cancel_token.cancelled() => Err(TaskError::Cancelled),
+    res = fut => Ok(res),
+}
+```
+
+**Impact:**
+- ✅ Cancelled scopes ALWAYS return Cancelled (not nondeterministic)
+- ✅ No "already cancelled but completed anyway" races
+- ✅ Predictable behavior in tests and production
+
+### 7. Uninterruptible Await Mode
+
+**Problem:** Parent cancellation discards already-computed child results.
+
+**Solution:** Two explicit await modes on `Deferred<T>`:
+```rust
+impl<T> Deferred<T> {
+    // Cancellation-aware (races against parent cancellation)
+    pub async fn await_result(self) -> Result<T, TaskError>
+
+    // Uninterruptible (waits for child regardless of parent)
+    pub async fn await_uninterruptible(self) -> Result<T, TaskError>
+}
+```
+
+**Impact:**
+- ✅ Explicit choice between cancellation-aware vs result-prioritizing
+- ✅ Can retrieve computed results even if parent cancelled
+- ✅ No silent data loss
+
+### 8. Drop Cleanup Guards
+
+**Problem:** Flow operators leaked tasks/memory when dropped mid-stream.
+
+**Solution:** RAII guards for automatic cleanup:
+```rust
+// For structured tasks (JobHandle)
+pub struct CancelOnDrop {
+    job: Option<JobHandle>,
+}
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        if let Some(job) = &self.job {
+            job.cancel();  // Cooperative cancellation
+        }
+    }
+}
+
+// For unstructured tasks (tokio::spawn)
+pub struct AbortOnDrop<T> {
+    handle: Option<JoinHandle<T>>,
+}
+impl Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        if let Some(handle) = &self.handle {
+            handle.abort();  // Immediate abort
+        }
+    }
+}
+```
+
+**Applied to:** `take()`, `buffer()`, `flat_map_latest()`
+
+**Impact:**
+- ✅ No task/memory leaks when Flow dropped
+- ✅ Automatic cleanup on panic or early return
+- ✅ Proper resource management
+
 ### Removed APIs
 
 - ❌ `try_with_dispatcher()` - removed (use `with_dispatcher`)
-- ❌ `await_unchecked()` - removed (use `await_result`)
+- ❌ `await_unchecked()` - removed (use `await_result` or `await_uninterruptible`)
 - ❌ `ensure_active!` macro - removed entirely (use `check_cancellation()?`)
 
 ## Current API
@@ -188,7 +283,9 @@ pub async fn await_result(self) -> Result<T, TaskError>
 
 ```rust
 // Cancellation checking
-pub fn check_cancellation() -> Result<(), CancellationError>
+pub fn check_cancellation() -> Result<(), CancellationError>  // Panics if not in scope
+pub fn check_cancellation_lenient() -> Result<(), CancellationError>  // Returns Ok if not in scope
+pub fn require_scope() -> Result<(), NotInScopeError>  // Check if in scope
 pub async fn yield_now()
 
 // Scope operations
@@ -203,9 +300,14 @@ impl CoroutineScope {
 
 // Deferred (like Kotlin's Deferred)
 impl<T> Deferred<T> {
-    pub async fn await_result(self) -> Result<T, TaskError>
+    pub async fn await_result(self) -> Result<T, TaskError>  // Cancellation-aware
+    pub async fn await_uninterruptible(self) -> Result<T, TaskError>  // Result-prioritizing
     pub fn job(&self) -> &JobHandle
 }
+
+// Drop guards for resource cleanup
+pub struct CancelOnDrop { ... }  // Cancels JobHandle on drop
+pub struct AbortOnDrop<T> { ... }  // Aborts JoinHandle on drop
 ```
 
 ### Helper Macros
