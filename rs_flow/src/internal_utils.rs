@@ -62,18 +62,73 @@ impl ScopeAwareHandle {
         }
     }
 
-    /// Convert to a drop guard that does nothing on drop
-    /// (tasks are already managed by their scope or tokio)
+    /// Cancel/abort the task immediately
+    ///
+    /// For scoped tasks: cancels the job (cooperative cancellation)
+    /// For unscoped tasks: aborts the task (forced cancellation)
+    pub fn cancel(self) {
+        match self {
+            ScopeAwareHandle::Scoped(job) => {
+                job.cancel();
+            }
+            ScopeAwareHandle::Unscoped(handle) => {
+                handle.abort();
+            }
+        }
+    }
+
+    /// Convert to a cancel-on-drop guard (default, safe behavior)
+    pub fn into_cancel_on_drop(self) -> CancelOnDrop {
+        CancelOnDrop(Some(self))
+    }
+
+    /// UNSAFE: Convert to keep-alive guard (task keeps running on drop)
+    ///
+    /// WARNING: For unscoped tasks, dropping the guard DETACHES the task.
+    /// Only use this if you're absolutely sure the task will be cleaned up
+    /// via other means (e.g., parent scope cancellation).
+    #[allow(dead_code)]
     pub fn into_keep_alive(self) -> KeepAlive {
         KeepAlive(Some(self))
     }
 }
 
-/// A wrapper that keeps a task alive until dropped
+/// A cancel-on-drop guard (DEFAULT, SAFE)
 ///
-/// Unlike AbortOnDrop, this doesn't abort the task - it just ensures
-/// the task handle isn't dropped prematurely. Tasks will complete normally
-/// or be cancelled through scope cancellation (cooperative).
+/// When dropped, this cancels the task immediately:
+/// - Scoped tasks: calls job.cancel() (cooperative cancellation)
+/// - Unscoped tasks: calls handle.abort() (forced cancellation)
+///
+/// This is the safe default that prevents task leaks.
+pub struct CancelOnDrop(Option<ScopeAwareHandle>);
+
+impl CancelOnDrop {
+    /// Wait for the task to complete, consuming the guard
+    #[allow(dead_code)]
+    pub async fn join(mut self) {
+        if let Some(handle) = self.0.take() {
+            handle.join().await;
+        }
+    }
+}
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        // CRITICAL: Cancel the task on drop to prevent leaks
+        if let Some(handle) = self.0.take() {
+            handle.cancel();
+        }
+    }
+}
+
+/// A keep-alive guard (UNSAFE, USE WITH CAUTION)
+///
+/// WARNING: This does NOT cancel the task on drop!
+/// - Scoped tasks: rely on scope cancellation (usually safe)
+/// - Unscoped tasks: DETACH when guard is dropped (LEAK!)
+///
+/// Only use this if you're certain the task will be cleaned up via
+/// other means (e.g., parent scope cancellation).
 #[allow(dead_code)]
 pub struct KeepAlive(Option<ScopeAwareHandle>);
 
@@ -90,7 +145,7 @@ impl KeepAlive {
 impl Drop for KeepAlive {
     fn drop(&mut self) {
         // Task handle is dropped but task keeps running
-        // This is intentional - scoped tasks will be cleaned up by scope cancellation
-        // Unscoped tasks will complete independently (fallback behavior)
+        // WARNING: For unscoped tasks, this DETACHES the task!
+        // This is intentional but dangerous - use with caution
     }
 }

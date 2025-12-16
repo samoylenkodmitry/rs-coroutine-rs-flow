@@ -83,7 +83,7 @@ where
                 let done_clone = Arc::clone(&done);
 
                 // Spawn upstream collection in current scope if available
-                let _producer = spawn_in_scope(async move {
+                let producer = spawn_in_scope(async move {
                     upstream
                         .collect(move |value| {
                             let tx = tx.clone();
@@ -99,7 +99,7 @@ where
                         })
                         .await;
                 })
-                .into_keep_alive();
+                .into_cancel_on_drop();
 
                 // Receive exactly `count` values then stop
                 let mut received = 0;
@@ -112,10 +112,10 @@ where
                     }
                 }
 
-                // Signal upstream to stop
+                // Signal upstream to stop and cancel producer task
                 done.store(true, Ordering::SeqCst);
                 drop(rx);
-                // Producer task will be cancelled via scope cancellation if we're in a scope
+                drop(producer); // Explicitly cancel the producer task
             }
         })
     }
@@ -132,7 +132,7 @@ where
 
                 // Spawn upstream collection in current scope if available
                 let stopped_clone = Arc::clone(&stopped);
-                let _producer = spawn_in_scope(async move {
+                let producer = spawn_in_scope(async move {
                     upstream
                         .collect(move |value| {
                             let tx = tx.clone();
@@ -152,20 +152,21 @@ where
                         })
                         .await;
                 })
-                .into_keep_alive();
+                .into_cancel_on_drop();
 
                 while let Some(value) = rx.recv().await {
                     // Check cancellation before emitting (lenient: no-op if not in scope)
                     if check_cancellation_lenient().is_err() {
                         stopped.store(true, Ordering::Relaxed);
                         drop(rx);
-                        // Producer task will be cancelled via scope cancellation
+                        drop(producer); // Explicitly cancel the producer task
                         return;
                     }
                     collector.emit(value).await;
                 }
 
-                // Producer completes naturally
+                // Producer completes naturally or is cancelled when guard drops
+                drop(producer);
             }
         })
     }
@@ -214,7 +215,7 @@ where
 
                 // Spawn producer task to transform upstream values to flows
                 // Move tx ownership entirely into spawned task to ensure proper cleanup
-                let _producer = {
+                let producer = {
                     let tx = tx_inner;
                     spawn_in_scope({
                         let f = Arc::clone(&f);
@@ -232,7 +233,7 @@ where
                             // tx (owned by callback closure) drops here, closing the channel
                         }
                     })
-                    .into_keep_alive()
+                    .into_cancel_on_drop()
                 };
 
                 // Single consumer loop using select! to switch between flows
@@ -287,7 +288,8 @@ where
                     }
                 }
 
-                // Producer guard will abort on drop
+                // Producer guard will cancel on drop
+                drop(producer);
             }
         })
     }
