@@ -29,6 +29,125 @@ impl Drop for JobCompletionGuard {
     }
 }
 
+/// Future returned by with_dispatcher that cancels the job on drop
+///
+/// CRITICAL: This prevents task detachment when the future is dropped
+/// (e.g., in a timeout or select!). The job is cancelled immediately,
+/// signaling the spawned task to stop.
+struct WithDispatcherFuture<T> {
+    join_handle: Option<BoxedJoinHandle>,
+    rx: oneshot::Receiver<Result<T, TaskError>>,
+    parent_token: CancelToken,
+    child_job: JobHandle,
+}
+
+impl<T> Drop for WithDispatcherFuture<T> {
+    fn drop(&mut self) {
+        // CRITICAL: Cancel the child job when this future is dropped
+        // This prevents the spawned task from becoming detached
+        self.child_job.cancel();
+        // JoinHandle drop is fine - the task will see cancellation via token
+    }
+}
+
+impl<T> Future for WithDispatcherFuture<T>
+where
+    T: Send + 'static,
+{
+    type Output = Result<T, TaskError>;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        // Check parent cancellation first
+        if self.parent_token.is_cancelled() {
+            // Parent cancelled - still need to await join_handle to observe panics
+            // but we'll return Cancelled
+            if let Some(mut handle) = self.join_handle.take() {
+                // Poll the join handle to completion
+                let handle_pin = std::pin::Pin::new(&mut handle);
+                match handle_pin.poll(cx) {
+                    std::task::Poll::Ready(Ok(())) => {
+                        // Task completed - return Cancelled since parent was cancelled
+                        return std::task::Poll::Ready(Err(TaskError::Cancelled));
+                    }
+                    std::task::Poll::Ready(Err(join_err)) if join_err.is_panic() => {
+                        // Task panicked - propagate panic even though parent cancelled
+                        let panic_payload = join_err.into_panic();
+                        let panic_msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                            s.to_string()
+                        } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                            s.clone()
+                        } else {
+                            "panic with non-string payload".to_string()
+                        };
+                        return std::task::Poll::Ready(Err(TaskError::Panicked(panic_msg)));
+                    }
+                    std::task::Poll::Ready(Err(_)) => {
+                        // Task aborted
+                        return std::task::Poll::Ready(Err(TaskError::Aborted));
+                    }
+                    std::task::Poll::Pending => {
+                        // Put handle back and return Pending
+                        self.join_handle = Some(handle);
+                        return std::task::Poll::Pending;
+                    }
+                }
+            }
+            return std::task::Poll::Ready(Err(TaskError::Cancelled));
+        }
+
+        // Not cancelled yet - poll join handle
+        if let Some(mut handle) = self.join_handle.take() {
+            let handle_pin = std::pin::Pin::new(&mut handle);
+            match handle_pin.poll(cx) {
+                std::task::Poll::Ready(Ok(())) => {
+                    // Task completed - get result from oneshot
+                    let rx_pin = std::pin::Pin::new(&mut self.rx);
+                    match rx_pin.poll(cx) {
+                        std::task::Poll::Ready(Ok(result)) => {
+                            return std::task::Poll::Ready(result);
+                        }
+                        std::task::Poll::Ready(Err(_)) => {
+                            // Sender dropped without sending
+                            return std::task::Poll::Ready(Err(TaskError::Aborted));
+                        }
+                        std::task::Poll::Pending => {
+                            // This shouldn't happen - task completed but didn't send?
+                            return std::task::Poll::Ready(Err(TaskError::Aborted));
+                        }
+                    }
+                }
+                std::task::Poll::Ready(Err(join_err)) if join_err.is_panic() => {
+                    // Task panicked
+                    let panic_payload = join_err.into_panic();
+                    let panic_msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                        s.clone()
+                    } else {
+                        "panic with non-string payload".to_string()
+                    };
+                    return std::task::Poll::Ready(Err(TaskError::Panicked(panic_msg)));
+                }
+                std::task::Poll::Ready(Err(_)) => {
+                    // Task aborted
+                    return std::task::Poll::Ready(Err(TaskError::Aborted));
+                }
+                std::task::Poll::Pending => {
+                    // Put handle back and return Pending
+                    self.join_handle = Some(handle);
+                    return std::task::Poll::Pending;
+                }
+            }
+        }
+
+        // Handle already taken and completed
+        std::task::Poll::Ready(Err(TaskError::Aborted))
+    }
+}
+
 /// A coroutine scope manages the lifecycle of coroutines
 #[derive(Clone)]
 pub struct CoroutineScope {
@@ -100,11 +219,16 @@ impl CoroutineScope {
     /// Returns `TaskError::Cancelled` if the scope is cancelled.
     /// Returns `TaskError::Panicked` if the future panics.
     /// Returns `TaskError::Aborted` if the task is dropped before completion.
-    pub async fn with_dispatcher<F, T>(
+    /// Run a future on a different dispatcher, creating a child scope
+    ///
+    /// CRITICAL: This returns impl Future with a cancel-on-drop guard.
+    /// If the returned future is dropped (e.g., in timeout/select!), the spawned
+    /// task will be cancelled immediately to prevent detachment.
+    pub fn with_dispatcher<F, T>(
         &self,
         dispatcher: Dispatcher,
         fut: F,
-    ) -> Result<T, TaskError>
+    ) -> impl Future<Output = Result<T, TaskError>> + Send + 'static
     where
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
@@ -117,6 +241,8 @@ impl CoroutineScope {
         });
         let cancel_token = child_scope.cancel_token.clone();
         let job = child_scope.job.clone();
+        let child_job_for_guard = job.clone();
+        let parent_token = self.cancel_token.clone();
 
         let join_handle = dispatcher.spawn(async move {
             // Create guard FIRST - ensures job.complete() is called even on panic
@@ -142,48 +268,13 @@ impl CoroutineScope {
             // Guard's Drop will call job.complete() here
         });
 
-        // Race between parent cancellation and task completion (including panics)
-        // CRITICAL: Must await join_handle exactly ONCE (no double-polling)
-
-        // Pin the join_handle so we can poll it in select! without moving
-        tokio::pin!(join_handle);
-
-        let join_result = tokio::select! {
-            biased;
-            _ = self.cancel_token.cancelled() => {
-                // Parent cancelled - still await to avoid orphaning task
-                (&mut join_handle).await
-            }
-            res = &mut join_handle => res,
-        };
-
-        match join_result {
-            Ok(()) => {
-                // Task completed - check if it was due to cancellation
-                if self.cancel_token.is_cancelled() {
-                    // Parent was cancelled at some point - return Cancelled
-                    Err(TaskError::Cancelled)
-                } else {
-                    // Task completed normally, get result from oneshot
-                    rx.await.unwrap_or(Err(TaskError::Aborted))
-                }
-            }
-            Err(join_err) if join_err.is_panic() => {
-                // Task panicked - propagate panic regardless of parent cancellation
-                let panic_payload = join_err.into_panic();
-                let panic_msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
-                    s.to_string()
-                } else if let Some(s) = panic_payload.downcast_ref::<String>() {
-                    s.clone()
-                } else {
-                    "panic with non-string payload".to_string()
-                };
-                Err(TaskError::Panicked(panic_msg))
-            }
-            Err(_) => {
-                // Task cancelled by runtime shutdown
-                Err(TaskError::Aborted)
-            }
+        // CRITICAL: Return a future that cancels the job on drop
+        // This prevents detachment when the outer future is dropped (e.g., in timeout)
+        WithDispatcherFuture {
+            join_handle: Some(join_handle),
+            rx,
+            parent_token,
+            child_job: child_job_for_guard,
         }
     }
 
