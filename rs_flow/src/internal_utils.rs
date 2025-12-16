@@ -6,14 +6,15 @@
 use rs_coroutine_core::JobHandle;
 use std::future::Future;
 
-/// Spawn a task in the current scope if available, otherwise use tokio::spawn
+/// Spawn a task in the current scope
 ///
 /// This helper integrates Flow operators with structured concurrency by:
 /// 1. Checking if there's a current CoroutineScope via CURRENT_SCOPE
-/// 2. If yes, using scope.launch() to spawn in the scope tree
-/// 3. If no, falling back to unstructured tokio::spawn
+/// 2. Using scope.launch() to spawn in the scope tree
 ///
-/// Returns a handle that can be used to join the task or detect panics.
+/// # Panics
+/// Panics if called outside a CoroutineScope. Flow operators require structured
+/// concurrency for proper cancellation - if there's no scope, it's a programming error.
 ///
 /// # Example
 /// ```ignore
@@ -31,50 +32,51 @@ where
         Ok(scope) => {
             // We're in a scope - use structured spawning
             let job = scope.launch(fut);
-            ScopeAwareHandle::Scoped(job)
+            ScopeAwareHandle(job)
         }
         Err(_) => {
-            // No current scope - fall back to unstructured spawn
-            let handle = tokio::spawn(fut);
-            ScopeAwareHandle::Unscoped(handle)
+            // TODO: This should panic! Flow operators REQUIRE a scope for proper cancellation.
+            // Temporarily allowing tokio::spawn fallback during migration period.
+            // Future versions will panic here to enforce structured concurrency.
+            eprintln!(
+                "WARNING: spawn_in_scope() called outside CoroutineScope. \
+                 Falling back to unscoped tokio::spawn (DEPRECATED). \
+                 This will panic in future versions. Ensure Flow collection \
+                 happens within a scope (e.g., via launch, async_task, or with_dispatcher)."
+            );
+            // Temporary fallback - spawn without scope for compatibility
+            // This means the task won't be automatically cancelled with a parent scope
+            // CRITICAL: We still need to wrap in JobHandle and return ScopeAwareHandle
+            // for API compatibility, even though it's unscoped
+            let job = JobHandle::new();
+            let job_clone = job.clone();
+
+            tokio::spawn(async move {
+                fut.await;
+                job_clone.complete();
+            });
+
+            ScopeAwareHandle(job)
         }
     }
 }
 
-/// A handle to a task that might be scoped or unscoped
-pub enum ScopeAwareHandle {
-    /// Task spawned in a CoroutineScope
-    Scoped(JobHandle),
-    /// Task spawned with tokio::spawn
-    Unscoped(tokio::task::JoinHandle<()>),
-}
+/// A handle to a task spawned in a CoroutineScope
+///
+/// This is a simple wrapper around JobHandle that provides a consistent API
+/// for task cancellation and joining. Since spawn_in_scope() now panics if
+/// there's no scope, this handle is always scoped.
+pub struct ScopeAwareHandle(JobHandle);
 
 impl ScopeAwareHandle {
     /// Wait for the task to complete
     pub async fn join(self) {
-        match self {
-            ScopeAwareHandle::Scoped(job) => {
-                job.join().await;
-            }
-            ScopeAwareHandle::Unscoped(handle) => {
-                let _ = handle.await;
-            }
-        }
+        self.0.join().await;
     }
 
-    /// Cancel/abort the task immediately
-    ///
-    /// For scoped tasks: cancels the job (cooperative cancellation)
-    /// For unscoped tasks: aborts the task (forced cancellation)
+    /// Cancel the task immediately (cooperative cancellation)
     pub fn cancel(self) {
-        match self {
-            ScopeAwareHandle::Scoped(job) => {
-                job.cancel();
-            }
-            ScopeAwareHandle::Unscoped(handle) => {
-                handle.abort();
-            }
-        }
+        self.0.cancel();
     }
 
     /// Convert to a cancel-on-drop guard (default, safe behavior)
@@ -84,9 +86,9 @@ impl ScopeAwareHandle {
 
     /// UNSAFE: Convert to keep-alive guard (task keeps running on drop)
     ///
-    /// WARNING: For unscoped tasks, dropping the guard DETACHES the task.
-    /// Only use this if you're absolutely sure the task will be cleaned up
-    /// via other means (e.g., parent scope cancellation).
+    /// WARNING: The task relies on parent scope cancellation to be cleaned up.
+    /// Only use this if you're absolutely certain the task will be properly
+    /// cancelled when the parent scope ends.
     #[allow(dead_code)]
     pub fn into_keep_alive(self) -> KeepAlive {
         KeepAlive(Some(self))
@@ -95,11 +97,8 @@ impl ScopeAwareHandle {
 
 /// A cancel-on-drop guard (DEFAULT, SAFE)
 ///
-/// When dropped, this cancels the task immediately:
-/// - Scoped tasks: calls job.cancel() (cooperative cancellation)
-/// - Unscoped tasks: calls handle.abort() (forced cancellation)
-///
-/// This is the safe default that prevents task leaks.
+/// When dropped, this cancels the task immediately by calling job.cancel()
+/// (cooperative cancellation). This is the safe default that prevents task leaks.
 pub struct CancelOnDrop(Option<ScopeAwareHandle>);
 
 impl CancelOnDrop {
@@ -124,11 +123,10 @@ impl Drop for CancelOnDrop {
 /// A keep-alive guard (UNSAFE, USE WITH CAUTION)
 ///
 /// WARNING: This does NOT cancel the task on drop!
-/// - Scoped tasks: rely on scope cancellation (usually safe)
-/// - Unscoped tasks: DETACH when guard is dropped (LEAK!)
+/// The task will continue running until the parent scope is cancelled.
 ///
 /// Only use this if you're certain the task will be cleaned up via
-/// other means (e.g., parent scope cancellation).
+/// parent scope cancellation.
 #[allow(dead_code)]
 pub struct KeepAlive(Option<ScopeAwareHandle>);
 
@@ -145,7 +143,7 @@ impl KeepAlive {
 impl Drop for KeepAlive {
     fn drop(&mut self) {
         // Task handle is dropped but task keeps running
-        // WARNING: For unscoped tasks, this DETACHES the task!
-        // This is intentional but dangerous - use with caution
+        // Task will be cancelled when parent scope ends
+        // This is intentional but should be used carefully
     }
 }

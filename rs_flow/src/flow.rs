@@ -125,16 +125,7 @@ impl Drop for FlowStreamGuard {
         // CRITICAL: Must cancel the collection task when stream is dropped
         // Without this, flat_map_latest leaks 999 tasks for 1000 items
         if let Some(handle) = self.0.take() {
-            match handle {
-                crate::internal_utils::ScopeAwareHandle::Scoped(job) => {
-                    // Scoped task - cancel the job so it stops immediately
-                    job.cancel();
-                }
-                crate::internal_utils::ScopeAwareHandle::Unscoped(handle) => {
-                    // Unscoped fallback - abort the task
-                    handle.abort();
-                }
-            }
+            handle.cancel();
         }
     }
 }
