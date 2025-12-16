@@ -78,14 +78,7 @@ where
                     }
                     std::task::Poll::Ready(Err(join_err)) if join_err.is_panic() => {
                         // Task panicked - propagate panic even though parent cancelled
-                        let panic_payload = join_err.into_panic();
-                        let panic_msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
-                            s.to_string()
-                        } else if let Some(s) = panic_payload.downcast_ref::<String>() {
-                            s.clone()
-                        } else {
-                            "panic with non-string payload".to_string()
-                        };
+                        let panic_msg = crate::error::extract_panic_message(join_err);
                         return std::task::Poll::Ready(Err(TaskError::Panicked(panic_msg)));
                     }
                     std::task::Poll::Ready(Err(_)) => {
@@ -125,14 +118,7 @@ where
                 }
                 std::task::Poll::Ready(Err(join_err)) if join_err.is_panic() => {
                     // Task panicked
-                    let panic_payload = join_err.into_panic();
-                    let panic_msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
-                        s.to_string()
-                    } else if let Some(s) = panic_payload.downcast_ref::<String>() {
-                        s.clone()
-                    } else {
-                        "panic with non-string payload".to_string()
-                    };
+                    let panic_msg = crate::error::extract_panic_message(join_err);
                     return std::task::Poll::Ready(Err(TaskError::Panicked(panic_msg)));
                 }
                 std::task::Poll::Ready(Err(_)) => {
@@ -182,7 +168,9 @@ impl CoroutineScope {
         let cancel_token = self.cancel_token.clone();
 
         let job_clone = job.clone();
-        dispatcher.spawn(async move {
+        let job_for_observer = job.clone();
+
+        let join_handle = dispatcher.spawn(async move {
             // Create guard FIRST - ensures job.complete() is called even on panic
             let _guard = JobCompletionGuard::new(job_clone);
 
@@ -209,6 +197,25 @@ impl CoroutineScope {
                 })
                 .await;
             // Guard's Drop will call job.complete() here
+        });
+
+        // Spawn observer task to detect panics and store in job outcome
+        // CRITICAL: This prevents panics from looking like success
+        tokio::spawn(async move {
+            match join_handle.await {
+                Ok(()) => {
+                    // Task completed normally (guard already called complete())
+                }
+                Err(join_err) if join_err.is_panic() => {
+                    // Task panicked - store panic in job outcome
+                    let panic_msg = crate::error::extract_panic_message(join_err);
+                    job_for_observer.complete_with(Err(TaskError::Panicked(panic_msg)));
+                }
+                Err(_) => {
+                    // Task aborted (e.g., runtime shutdown)
+                    job_for_observer.complete_with(Err(TaskError::Aborted));
+                }
+            }
         });
 
         job
@@ -394,14 +401,7 @@ impl<T> Deferred<T> {
             }
             Err(join_err) if join_err.is_panic() => {
                 // Task panicked - propagate panic regardless of parent cancellation
-                let panic_payload = join_err.into_panic();
-                let panic_msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
-                    s.to_string()
-                } else if let Some(s) = panic_payload.downcast_ref::<String>() {
-                    s.clone()
-                } else {
-                    "panic with non-string payload".to_string()
-                };
+                let panic_msg = crate::error::extract_panic_message(join_err);
                 Err(TaskError::Panicked(panic_msg))
             }
             Err(_) => {
@@ -436,14 +436,7 @@ impl<T> Deferred<T> {
             }
             Err(join_err) if join_err.is_panic() => {
                 // Task panicked - use JoinError to get panic info (proper Tokio idiom)
-                let panic_payload = join_err.into_panic();
-                let panic_msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
-                    s.to_string()
-                } else if let Some(s) = panic_payload.downcast_ref::<String>() {
-                    s.clone()
-                } else {
-                    "panic with non-string payload".to_string()
-                };
+                let panic_msg = crate::error::extract_panic_message(join_err);
                 Err(TaskError::Panicked(panic_msg))
             }
             Err(_) => {

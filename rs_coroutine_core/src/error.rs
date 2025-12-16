@@ -1,7 +1,7 @@
 use std::fmt;
 
 /// Error type for task execution failures
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum TaskError {
     /// Task was cancelled
     Cancelled,
@@ -52,3 +52,19 @@ impl std::fmt::Display for NotInScopeError {
 }
 
 impl std::error::Error for NotInScopeError {}
+
+/// Extract a panic message from a JoinError
+///
+/// Attempts to downcast the panic payload to common string types.
+/// Returns a generic message if the payload is not a string.
+pub fn extract_panic_message(join_error: tokio::task::JoinError) -> String {
+    let panic_payload = join_error.into_panic();
+
+    if let Some(s) = panic_payload.downcast_ref::<&str>() {
+        s.to_string()
+    } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "panic with non-string payload".to_string()
+    }
+}

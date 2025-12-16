@@ -1,6 +1,8 @@
 use std::sync::Arc;
-use tokio::sync::Notify;
+use tokio::sync::{Mutex, Notify};
 use tokio_util::sync::CancellationToken;
+
+use crate::error::TaskError;
 
 /// A cancellation token for cooperative cancellation
 ///
@@ -63,6 +65,7 @@ impl Default for CancelToken {
 pub struct JobHandle {
     cancel_token: CancelToken,
     completed: Arc<Notify>,
+    outcome: Arc<Mutex<Option<Result<(), TaskError>>>>,
 }
 
 impl JobHandle {
@@ -71,6 +74,7 @@ impl JobHandle {
         Self {
             cancel_token: CancelToken::new(),
             completed: Arc::new(Notify::new()),
+            outcome: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -79,6 +83,7 @@ impl JobHandle {
         Self {
             cancel_token: self.cancel_token.child(),
             completed: Arc::new(Notify::new()),
+            outcome: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -92,13 +97,35 @@ impl JobHandle {
         self.cancel_token.is_cancelled()
     }
 
-    /// Wait for this job to complete
+    /// Wait for this job to complete (backwards compatible - discards outcome)
     pub async fn join(&self) {
         self.completed.notified().await;
     }
 
-    /// Mark this job as completed
+    /// Wait for this job to complete and get the outcome
+    pub async fn join_result(&self) -> Result<(), TaskError> {
+        self.completed.notified().await;
+        // Get the outcome, defaulting to success if none was set
+        self.outcome
+            .lock()
+            .await
+            .clone()
+            .unwrap_or(Ok(()))
+    }
+
+    /// Mark this job as completed with success
     pub fn complete(&self) {
+        self.complete_with(Ok(()));
+    }
+
+    /// Mark this job as completed with an outcome
+    pub fn complete_with(&self, result: Result<(), TaskError>) {
+        // Store the outcome (don't overwrite if already set)
+        if let Ok(mut outcome) = self.outcome.try_lock() {
+            if outcome.is_none() {
+                *outcome = Some(result);
+            }
+        }
         self.completed.notify_waiters();
     }
 
