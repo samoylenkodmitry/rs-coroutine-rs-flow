@@ -3,7 +3,7 @@
 /// This module contains helpers used by Flow operators to integrate with
 /// structured concurrency properly.
 
-use rs_coroutine_core::JobHandle;
+use rs_coroutine_core::{CancelToken, JobHandle};
 use std::future::Future;
 
 /// Spawn a task in the current scope
@@ -31,8 +31,12 @@ where
     match rs_coroutine_core::CURRENT_SCOPE.try_with(|scope| scope.clone()) {
         Ok(scope) => {
             // We're in a scope - use structured spawning
+            let cancel_token = scope.cancel_token.clone();
             let job = scope.launch(fut);
-            ScopeAwareHandle(job)
+            ScopeAwareHandle {
+                job,
+                cancel_token,
+            }
         }
         Err(_) => {
             // CRITICAL: Flow operators REQUIRE structured concurrency for proper cancellation.
@@ -49,20 +53,23 @@ where
 
 /// A handle to a task spawned in a CoroutineScope
 ///
-/// This is a simple wrapper around JobHandle that provides a consistent API
-/// for task cancellation and joining. Since spawn_in_scope() now panics if
-/// there's no scope, this handle is always scoped.
-pub struct ScopeAwareHandle(JobHandle);
+/// This wraps both the JobHandle (for completion tracking) and the CancelToken
+/// (for cancellation). This design makes cancellation explicit and avoids
+/// the dual-token hierarchy confusion.
+pub struct ScopeAwareHandle {
+    job: JobHandle,
+    cancel_token: CancelToken,
+}
 
 impl ScopeAwareHandle {
     /// Wait for the task to complete
     pub async fn join(self) {
-        self.0.join().await;
+        self.job.join().await;
     }
 
     /// Cancel the task immediately (cooperative cancellation)
     pub fn cancel(self) {
-        self.0.cancel();
+        self.cancel_token.cancel();
     }
 
     /// Convert to a cancel-on-drop guard (default, safe behavior)

@@ -164,7 +164,7 @@ impl CoroutineScope {
     {
         let scope = Arc::new(self.clone());
         let dispatcher = self.dispatcher.clone();
-        let job = self.job.new_child();
+        let job = JobHandle::new();  // New job for launched coroutine
         let cancel_token = self.cancel_token.clone();
 
         let job_clone = job.clone();
@@ -247,8 +247,8 @@ impl CoroutineScope {
         let (tx, rx) = oneshot::channel();
         let child_scope = Arc::new(CoroutineScope {
             dispatcher: dispatcher.clone(),
-            job: self.job.new_child(),
-            cancel_token: self.cancel_token.child(),
+            job: JobHandle::new(),  // New job for child scope
+            cancel_token: self.cancel_token.child(),  // Child of parent's cancellation token
         });
         let cancel_token = child_scope.cancel_token.clone();
         let job = child_scope.job.clone();
@@ -301,8 +301,8 @@ impl CoroutineScope {
         let (tx, rx) = oneshot::channel();
         let child_scope = Arc::new(CoroutineScope {
             dispatcher: dispatcher.clone(),
-            job: self.job.new_child(),
-            cancel_token: self.cancel_token.child(),
+            job: JobHandle::new(),  // New job for child scope
+            cancel_token: self.cancel_token.child(),  // Child of parent's cancellation token
         });
         let cancel_token = child_scope.cancel_token.clone();
         let job = child_scope.job.clone();
@@ -340,10 +340,12 @@ impl CoroutineScope {
         }
     }
 
-    /// Cancel this scope
+    /// Cancel this scope and all child scopes
+    ///
+    /// Cancellation is propagated via the CancelToken hierarchy.
+    /// All tasks waiting on this scope's token (or child tokens) will observe cancellation.
     pub fn cancel(&self) {
         self.cancel_token.cancel();
-        self.job.cancel();
     }
 
     /// Check if this scope is cancelled

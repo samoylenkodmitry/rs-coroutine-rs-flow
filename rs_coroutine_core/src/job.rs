@@ -60,10 +60,13 @@ impl Default for CancelToken {
     }
 }
 
-/// A handle to a job that can be cancelled and awaited
+/// A handle to a job that tracks completion and outcome
+///
+/// JobHandle does NOT handle cancellation directly. Cancellation is managed
+/// via CancelToken in the CoroutineScope. This separation makes the cancellation
+/// hierarchy clear and prevents dual-token confusion.
 #[derive(Clone)]
 pub struct JobHandle {
-    cancel_token: CancelToken,
     completed: Arc<Notify>,
     outcome: Arc<Mutex<Option<Result<(), TaskError>>>>,
 }
@@ -72,29 +75,9 @@ impl JobHandle {
     /// Create a new JobHandle
     pub fn new() -> Self {
         Self {
-            cancel_token: CancelToken::new(),
             completed: Arc::new(Notify::new()),
             outcome: Arc::new(Mutex::new(None)),
         }
-    }
-
-    /// Create a child job
-    pub fn new_child(&self) -> Self {
-        Self {
-            cancel_token: self.cancel_token.child(),
-            completed: Arc::new(Notify::new()),
-            outcome: Arc::new(Mutex::new(None)),
-        }
-    }
-
-    /// Cancel this job
-    pub fn cancel(&self) {
-        self.cancel_token.cancel();
-    }
-
-    /// Check if this job is cancelled
-    pub fn is_cancelled(&self) -> bool {
-        self.cancel_token.is_cancelled()
     }
 
     /// Wait for this job to complete (backwards compatible - discards outcome)
@@ -128,51 +111,11 @@ impl JobHandle {
         }
         self.completed.notify_waiters();
     }
-
-    /// Get the cancel token for this job
-    pub fn cancel_token(&self) -> &CancelToken {
-        &self.cancel_token
-    }
 }
 
 impl Default for JobHandle {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-/// A guard that cancels a job when dropped
-///
-/// This is useful for background tasks that should be cancelled if the owner is dropped.
-/// For example, Flow operators can use this to ensure producer tasks are cleaned up.
-pub struct CancelOnDrop {
-    job: Option<JobHandle>,
-}
-
-impl CancelOnDrop {
-    /// Create a new CancelOnDrop guard for a job
-    pub fn new(job: JobHandle) -> Self {
-        Self { job: Some(job) }
-    }
-
-    /// Get a reference to the job handle
-    pub fn job(&self) -> &JobHandle {
-        self.job.as_ref().expect("CancelOnDrop job already taken")
-    }
-
-    /// Take the job handle, disabling automatic cancellation
-    pub fn into_inner(mut self) -> JobHandle {
-        self.job.take().expect("CancelOnDrop job already taken")
-    }
-}
-
-impl Drop for CancelOnDrop {
-    fn drop(&mut self) {
-        if let Some(job) = &self.job {
-            job.cancel();
-            // Note: We cancel but don't join() - the task will stop cooperatively
-            // Joining would block the Drop, which is not allowed in async contexts
-        }
     }
 }
 
