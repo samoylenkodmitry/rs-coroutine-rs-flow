@@ -1,5 +1,4 @@
 use super::*;
-use rs_coroutine_core::check_cancellation_lenient;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -25,10 +24,6 @@ where
                         let f = Arc::clone(&f);
                         let collector = collector.clone();
                         async move {
-                            // Check cancellation before processing (lenient: no-op if not in scope)
-                            if check_cancellation_lenient().is_err() {
-                                return;
-                            }
                             let mapped = f(value).await;
                             collector.emit(mapped).await;
                         }
@@ -54,10 +49,6 @@ where
                         let predicate = Arc::clone(&predicate);
                         let collector = collector.clone();
                         async move {
-                            // Check cancellation before processing (lenient: no-op if not in scope)
-                            if check_cancellation_lenient().is_err() {
-                                return;
-                            }
                             if predicate(&value).await {
                                 collector.emit(value).await;
                             }
@@ -155,13 +146,6 @@ where
                 .into_cancel_on_drop();
 
                 while let Some(value) = rx.recv().await {
-                    // Check cancellation before emitting (lenient: no-op if not in scope)
-                    if check_cancellation_lenient().is_err() {
-                        stopped.store(true, Ordering::Relaxed);
-                        drop(rx);
-                        drop(producer); // Explicitly cancel the producer task
-                        return;
-                    }
                     collector.emit(value).await;
                 }
 
@@ -309,10 +293,6 @@ where
                         let f = Arc::clone(&f);
                         let collector = collector.clone();
                         async move {
-                            // Check cancellation before processing (lenient: no-op if not in scope)
-                            if check_cancellation_lenient().is_err() {
-                                return;
-                            }
                             let mapped = f(value);
                             collector.emit(mapped).await;
                         }
@@ -337,10 +317,6 @@ where
                         let predicate = Arc::clone(&predicate);
                         let collector = collector.clone();
                         async move {
-                            // Check cancellation before processing (lenient: no-op if not in scope)
-                            if check_cancellation_lenient().is_err() {
-                                return;
-                            }
                             if predicate(&value) {
                                 collector.emit(value).await;
                             }
