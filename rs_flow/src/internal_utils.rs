@@ -35,28 +35,14 @@ where
             ScopeAwareHandle(job)
         }
         Err(_) => {
-            // TODO: This should panic! Flow operators REQUIRE a scope for proper cancellation.
-            // Temporarily allowing tokio::spawn fallback during migration period.
-            // Future versions will panic here to enforce structured concurrency.
-            eprintln!(
-                "WARNING: spawn_in_scope() called outside CoroutineScope. \
-                 Falling back to unscoped tokio::spawn (DEPRECATED). \
-                 This will panic in future versions. Ensure Flow collection \
-                 happens within a scope (e.g., via launch, async_task, or with_dispatcher)."
+            // CRITICAL: Flow operators REQUIRE structured concurrency for proper cancellation.
+            // Without a scope, spawned tasks cannot be cancelled and will leak.
+            panic!(
+                "spawn_in_scope() called outside CoroutineScope. \
+                 Flow operators require structured concurrency - ensure Flow \
+                 collection happens within a scope (e.g., via scope.launch(), \
+                 scope.async_task(), or scope.with_dispatcher())."
             );
-            // Temporary fallback - spawn without scope for compatibility
-            // This means the task won't be automatically cancelled with a parent scope
-            // CRITICAL: We still need to wrap in JobHandle and return ScopeAwareHandle
-            // for API compatibility, even though it's unscoped
-            let job = JobHandle::new();
-            let job_clone = job.clone();
-
-            tokio::spawn(async move {
-                fut.await;
-                job_clone.complete();
-            });
-
-            ScopeAwareHandle(job)
         }
     }
 }

@@ -32,20 +32,24 @@ impl Drop for JobCompletionGuard {
 /// Future returned by with_dispatcher that cancels the job on drop
 ///
 /// CRITICAL: This prevents task detachment when the future is dropped
-/// (e.g., in a timeout or select!). The job is cancelled immediately,
+/// (e.g., in a timeout or select!). The cancel token is cancelled immediately,
 /// signaling the spawned task to stop.
 struct WithDispatcherFuture<T> {
     join_handle: Option<BoxedJoinHandle>,
     rx: oneshot::Receiver<Result<T, TaskError>>,
     parent_token: CancelToken,
-    child_job: JobHandle,
+    child_cancel_token: CancelToken,
 }
 
 impl<T> Drop for WithDispatcherFuture<T> {
     fn drop(&mut self) {
-        // CRITICAL: Cancel the child job when this future is dropped
-        // This prevents the spawned task from becoming detached
-        self.child_job.cancel();
+        // CRITICAL: Only cancel if the future hasn't completed yet.
+        // After poll returns Ready, join_handle is None, so we don't spuriously
+        // cancel a successfully completed job.
+        if self.join_handle.is_some() {
+            // Cancel the token that the task is actually waiting on
+            self.child_cancel_token.cancel();
+        }
         // JoinHandle drop is fine - the task will see cancellation via token
     }
 }
@@ -241,7 +245,7 @@ impl CoroutineScope {
         });
         let cancel_token = child_scope.cancel_token.clone();
         let job = child_scope.job.clone();
-        let child_job_for_guard = job.clone();
+        let child_cancel_token_for_guard = child_scope.cancel_token.clone();
         let parent_token = self.cancel_token.clone();
 
         let join_handle = dispatcher.spawn(async move {
@@ -268,13 +272,13 @@ impl CoroutineScope {
             // Guard's Drop will call job.complete() here
         });
 
-        // CRITICAL: Return a future that cancels the job on drop
+        // CRITICAL: Return a future that cancels the token on drop
         // This prevents detachment when the outer future is dropped (e.g., in timeout)
         WithDispatcherFuture {
             join_handle: Some(join_handle),
             rx,
             parent_token,
-            child_job: child_job_for_guard,
+            child_cancel_token: child_cancel_token_for_guard,
         }
     }
 
