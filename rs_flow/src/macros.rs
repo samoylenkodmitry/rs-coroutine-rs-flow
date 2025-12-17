@@ -289,8 +289,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_sync_operators() {
-        use rs_coroutine_core::{CoroutineScope, Dispatchers};
-
         let numbers: Flow<i32> = flow! {
             for i in 1..=10 {
                 let _ = emit!(i);
@@ -300,21 +298,18 @@ mod tests {
         let collected = Arc::new(Mutex::new(Vec::new()));
         let collected_clone = Arc::clone(&collected);
 
-        let scope = CoroutineScope::new(Dispatchers::main());
-        let _ = scope.launch(async move {
-            let _ = numbers
-                .map_sync(|x| x * 2)
-                .filter_sync(|x| *x > 5)
-                .take(3)
-                .collect(move |x| {
-                    let collected = Arc::clone(&collected_clone);
-                    async move {
-                        collected.lock().await.push(x);
-                        std::ops::ControlFlow::Continue(())
-                    }
-                })
-                .await;
-        }).join().await;
+        let _ = numbers
+            .map_sync(|x| x * 2)
+            .filter_sync(|x| *x > 5)
+            .take(3)
+            .collect(move |x| {
+                let collected = Arc::clone(&collected_clone);
+                async move {
+                    collected.lock().await.push(x);
+                    std::ops::ControlFlow::Continue(())
+                }
+            })
+            .await;
 
         let result = collected.lock().await;
         assert_eq!(*result, vec![6, 8, 10]);
@@ -322,8 +317,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_take_operator() {
-        use rs_coroutine_core::{CoroutineScope, Dispatchers};
-
         let numbers: Flow<i32> = flow_fn(|collector| async move {
             for i in 1..=10 {
                 match collector.emit(i).await {
@@ -337,19 +330,16 @@ mod tests {
         let collected = Arc::new(Mutex::new(Vec::new()));
         let collected_clone = Arc::clone(&collected);
 
-        let scope = CoroutineScope::new(Dispatchers::main());
-        let _ = scope.launch(async move {
-            let _ = numbers
-                .take(3)
-                .collect(move |x| {
-                    let collected = Arc::clone(&collected_clone);
-                    async move {
-                        collected.lock().await.push(x);
-                        std::ops::ControlFlow::Continue(())
-                    }
-                })
-                .await;
-        }).join().await;
+        let _ = numbers
+            .take(3)
+            .collect(move |x| {
+                let collected = Arc::clone(&collected_clone);
+                async move {
+                    collected.lock().await.push(x);
+                    std::ops::ControlFlow::Continue(())
+                }
+            })
+            .await;
 
         let result = collected.lock().await;
         assert_eq!(*result, vec![1, 2, 3]);

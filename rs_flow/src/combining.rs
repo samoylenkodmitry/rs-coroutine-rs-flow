@@ -435,8 +435,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_zip() {
-        use rs_coroutine_core::{CoroutineScope, Dispatchers};
-
         let flow1 = flow(|c| async move {
             let _ = c.emit(1).await;
             let _ = c.emit(2).await;
@@ -450,10 +448,7 @@ mod tests {
         });
 
         let zipped = flow1.zip(flow2, |a, b| format!("{}{}", a, b));
-        let scope = CoroutineScope::new(Dispatchers::main());
-        let result = scope.async_task(Dispatchers::main(), async move {
-            zipped.to_vec().await
-        }).await_result().await.unwrap();
+        let result = zipped.to_vec().await;
 
         assert_eq!(result, vec!["1a", "2b", "3c"]);
     }
@@ -490,8 +485,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_merge() {
-        use rs_coroutine_core::{CoroutineScope, Dispatchers};
-
         let flow1 = flow(|c| async move {
             let _ = c.emit(1).await;
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -506,10 +499,7 @@ mod tests {
         });
 
         let merged = merge(vec![flow1, flow2]);
-        let scope = CoroutineScope::new(Dispatchers::main());
-        let result = scope.async_task(Dispatchers::main(), async move {
-            merged.to_vec().await
-        }).await_result().await.unwrap();
+        let result = merged.to_vec().await;
 
         // Values arrive in time order (roughly)
         assert_eq!(result.len(), 4);

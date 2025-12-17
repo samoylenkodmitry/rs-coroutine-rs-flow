@@ -3,25 +3,42 @@
 /// This module contains helpers used by Flow operators to integrate with
 /// structured concurrency properly.
 
-use rs_coroutine_core::{CancelToken, JobHandle};
+use rs_coroutine_core::{CancelToken, JobHandle, TaskError};
 use std::future::Future;
 
-/// Spawn a task in the current scope
+/// Spawn a task in the current scope (with lenient fallback)
 ///
 /// This helper integrates Flow operators with structured concurrency by:
 /// 1. Checking if there's a current CoroutineScope via CURRENT_SCOPE
-/// 2. Using scope.launch() to spawn in the scope tree
+/// 2. Using scope.launch() to spawn in the scope tree if available
+/// 3. **Falling back to detached spawn** if no scope is available
 ///
-/// # Panics
-/// Panics if called outside a CoroutineScope. Flow operators require structured
-/// concurrency for proper cancellation - if there's no scope, it's a programming error.
+/// # Lenient Fallback Behavior
+///
+/// When called outside a CoroutineScope, this creates a "detached" task:
+/// - Spawns directly with `tokio::spawn` (no parent scope)
+/// - Creates an independent `CancelToken` (can only be cancelled via the returned handle)
+/// - Task continues running until completion or explicit cancellation
+///
+/// This allows Flows to work in simpler contexts (like unit tests) without
+/// requiring full CoroutineScope setup, similar to Kotlin's Flow behavior.
+///
+/// # Best Practices
+///
+/// - **Production code**: Always use within a CoroutineScope for proper cancellation hierarchy
+/// - **Tests/Prototypes**: Lenient fallback allows quick experimentation
+/// - **Concurrent operators** (buffer, merge, etc.): Work in both modes but cancellation
+///   is more limited in detached mode
 ///
 /// # Example
 /// ```ignore
-/// let handle = spawn_in_scope(async {
-///     // Task work here
+/// // In production - structured concurrency
+/// scope.launch(async {
+///     flow.buffer(10).collect(|x| { ... }).await;
 /// });
-/// handle.join().await;
+///
+/// // In tests - lenient fallback (detached)
+/// flow.buffer(10).collect(|x| { ... }).await; // Still works!
 /// ```
 pub fn spawn_in_scope<F>(fut: F) -> ScopeAwareHandle
 where
@@ -30,35 +47,79 @@ where
     // Try to get current scope via CURRENT_SCOPE
     match rs_coroutine_core::CURRENT_SCOPE.try_with(|scope| scope.clone()) {
         Ok(scope) => {
-            // We're in a scope - use structured spawning
+            // We're in a scope - use structured spawning (preferred path)
             let cancel_token = scope.cancel_token.clone();
             let job = scope.launch(fut);
             ScopeAwareHandle {
                 job,
                 cancel_token,
+                is_detached: false,
             }
         }
         Err(_) => {
-            // CRITICAL: Flow operators REQUIRE structured concurrency for proper cancellation.
-            // Without a scope, spawned tasks cannot be cancelled and will leak.
-            panic!(
-                "spawn_in_scope() called outside CoroutineScope. \
-                 Flow operators require structured concurrency - ensure Flow \
-                 collection happens within a scope (e.g., via scope.launch(), \
-                 scope.async_task(), or scope.with_dispatcher())."
-            );
+            // No scope available - create detached task (lenient fallback)
+            // This allows Flows to work in simpler contexts without requiring
+            // full CoroutineScope setup, similar to Kotlin's Flow
+            let cancel_token = CancelToken::new();
+            let cancel_clone = cancel_token.clone();
+            let job = JobHandle::new();
+            let job_clone = job.clone();
+
+            // Spawn detached task with cancellation support
+            let handle = tokio::spawn(async move {
+                // Wrap future to respect cancellation token
+                tokio::select! {
+                    biased;
+                    _ = cancel_clone.cancelled() => {
+                        // Task was cancelled via handle
+                        job_clone.complete_with(Err(TaskError::Cancelled));
+                    }
+                    _ = fut => {
+                        // Task completed normally
+                        job_clone.complete();
+                    }
+                }
+            });
+
+            // Spawn observer to detect panics (same pattern as scope.launch)
+            let job_observer = job.clone();
+            tokio::spawn(async move {
+                match handle.await {
+                    Ok(()) => {
+                        // Task completed (job.complete already called)
+                    }
+                    Err(join_err) if join_err.is_panic() => {
+                        let panic_msg = rs_coroutine_core::error::extract_panic_message(join_err);
+                        job_observer.complete_with(Err(TaskError::Panicked(panic_msg)));
+                    }
+                    Err(_) => {
+                        job_observer.complete_with(Err(TaskError::Aborted));
+                    }
+                }
+            });
+
+            ScopeAwareHandle {
+                job,
+                cancel_token,
+                is_detached: true,
+            }
         }
     }
 }
 
-/// A handle to a task spawned in a CoroutineScope
+/// A handle to a task spawned in a CoroutineScope (or detached)
 ///
 /// This wraps both the JobHandle (for completion tracking) and the CancelToken
 /// (for cancellation). This design makes cancellation explicit and avoids
 /// the dual-token hierarchy confusion.
+///
+/// The `is_detached` flag tracks whether this task was spawned within a scope
+/// (structured concurrency) or as a standalone task (lenient fallback).
 pub struct ScopeAwareHandle {
     job: JobHandle,
     cancel_token: CancelToken,
+    #[allow(dead_code)]
+    is_detached: bool,
 }
 
 impl ScopeAwareHandle {
