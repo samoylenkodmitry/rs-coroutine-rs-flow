@@ -1,5 +1,6 @@
-use std::sync::Arc;
-use tokio::sync::{Mutex, Notify};
+use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::TaskError;
@@ -65,10 +66,21 @@ impl Default for CancelToken {
 /// JobHandle does NOT handle cancellation directly. Cancellation is managed
 /// via CancelToken in the CoroutineScope. This separation makes the cancellation
 /// hierarchy clear and prevents dual-token confusion.
+///
+/// ## Implementation Notes
+///
+/// Uses `AtomicBool` + `Notify` pattern to avoid missed wakeups:
+/// - `is_completed` is checked BEFORE awaiting notification
+/// - This prevents the race where `complete_with()` fires before `join()` starts waiting
+///
+/// Uses `std::sync::Mutex` (not `tokio::sync::Mutex`) for outcome:
+/// - Blocking lock ensures outcome is NEVER lost (no `try_lock` failures)
+/// - Safe because critical section is tiny (just a comparison + store)
 #[derive(Clone)]
 pub struct JobHandle {
     completed: Arc<Notify>,
-    outcome: Arc<Mutex<Option<Result<(), TaskError>>>>,
+    outcome: Arc<StdMutex<Option<Result<(), TaskError>>>>,
+    is_completed: Arc<AtomicBool>,
 }
 
 impl JobHandle {
@@ -76,22 +88,39 @@ impl JobHandle {
     pub fn new() -> Self {
         Self {
             completed: Arc::new(Notify::new()),
-            outcome: Arc::new(Mutex::new(None)),
+            outcome: Arc::new(StdMutex::new(None)),
+            is_completed: Arc::new(AtomicBool::new(false)),
         }
     }
 
     /// Wait for this job to complete (backwards compatible - discards outcome)
+    ///
+    /// ## Correctness
+    ///
+    /// Checks `is_completed` BEFORE awaiting notification to avoid missed wakeup race:
+    /// - If already completed, returns immediately
+    /// - Otherwise, awaits notification (which is guaranteed to come after we checked)
     pub async fn join(&self) {
+        // CRITICAL: Check completion state BEFORE creating notified() future
+        // This prevents the race where complete_with() fires between now and await
+        if self.is_completed.load(Ordering::Acquire) {
+            return;
+        }
         self.completed.notified().await;
     }
 
     /// Wait for this job to complete and get the outcome
     pub async fn join_result(&self) -> Result<(), TaskError> {
-        self.completed.notified().await;
-        // Get the outcome, defaulting to success if none was set
+        // CRITICAL: Check completion state BEFORE awaiting notification (same as join())
+        if !self.is_completed.load(Ordering::Acquire) {
+            self.completed.notified().await;
+        }
+
+        // Get the outcome (using std::sync::Mutex, so this is a blocking lock)
+        // Safe because: (1) critical section is tiny, (2) no await inside lock
         self.outcome
             .lock()
-            .await
+            .expect("JobHandle outcome mutex poisoned")
             .clone()
             .unwrap_or(Ok(()))
     }
@@ -102,13 +131,63 @@ impl JobHandle {
     }
 
     /// Mark this job as completed with an outcome
+    ///
+    /// ## Outcome Upgrade Policy
+    ///
+    /// Allows "worse" outcomes to overwrite "better" ones to ensure critical errors
+    /// are never masked:
+    ///
+    /// - **Panicked** > Aborted > Cancelled > Ok (success)
+    /// - If outcome is already `Panicked`, it cannot be downgraded
+    /// - If outcome is `Ok` but new outcome is an error, upgrade to the error
+    ///
+    /// This prevents the race where:
+    /// 1. JobCompletionGuard stores `Ok(())` on normal completion
+    /// 2. Observer detects panic and tries to store `Panicked`
+    /// 3. Without upgrades, panic would be lost and job reports success
+    ///
+    /// ## Thread Safety
+    ///
+    /// Uses `std::sync::Mutex` (blocking) instead of `try_lock` to guarantee
+    /// outcome is NEVER silently lost due to lock contention.
     pub fn complete_with(&self, result: Result<(), TaskError>) {
-        // Store the outcome (don't overwrite if already set)
-        if let Ok(mut outcome) = self.outcome.try_lock() {
-            if outcome.is_none() {
-                *outcome = Some(result);
-            }
+        // CRITICAL: Use blocking lock, not try_lock
+        // If this blocks, it's only for microseconds (tiny critical section)
+        let mut outcome = self.outcome.lock().expect("JobHandle outcome mutex poisoned");
+
+        // Determine if we should update the outcome (allow upgrades to "worse" outcomes)
+        let should_update = match (&*outcome, &result) {
+            // No outcome yet - always store
+            (None, _) => true,
+
+            // Current is Ok - any error is an upgrade
+            (Some(Ok(())), Err(_)) => true,
+
+            // Current is Cancelled - Panicked or Aborted is an upgrade
+            (Some(Err(TaskError::Cancelled)), Err(TaskError::Panicked(_))) => true,
+            (Some(Err(TaskError::Cancelled)), Err(TaskError::Aborted)) => true,
+
+            // Current is Aborted - only Panicked can upgrade
+            (Some(Err(TaskError::Aborted)), Err(TaskError::Panicked(_))) => true,
+
+            // Current is Panicked - cannot downgrade (panic is worst outcome)
+            (Some(Err(TaskError::Panicked(_))), _) => false,
+
+            // All other cases - don't overwrite
+            _ => false,
+        };
+
+        if should_update {
+            *outcome = Some(result);
         }
+
+        // Release lock before notifying
+        drop(outcome);
+
+        // Set completion flag BEFORE notifying to ensure join() sees it
+        self.is_completed.store(true, Ordering::Release);
+
+        // Wake all waiters
         self.completed.notify_waiters();
     }
 }
