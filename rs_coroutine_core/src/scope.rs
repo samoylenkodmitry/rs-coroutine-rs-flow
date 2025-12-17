@@ -391,15 +391,12 @@ impl<T> Deferred<T> {
 
         match join_result {
             Ok(()) => {
-                // Task completed - check if it was due to cancellation
-                if self.parent_cancel_token.is_cancelled() {
-                    // Parent was cancelled at some point - return Cancelled
-                    Err(TaskError::Cancelled)
-                } else {
-                    // Task completed normally, get result from oneshot
-                    // RecvError only occurs if sender dropped without sending (runtime abort/shutdown)
-                    self.rx.await.unwrap_or(Err(TaskError::Aborted))
-                }
+                // Task completed successfully - ALWAYS retrieve result regardless of parent cancellation
+                // Priority: If the task finished computing a value, that value should be returned
+                // even if the parent scope was cancelled during execution.
+                // Cancellation means "stop if you haven't finished", not "pretend you didn't finish".
+                // RecvError only occurs if sender dropped without sending (runtime abort/shutdown)
+                self.rx.await.unwrap_or(Err(TaskError::Aborted))
             }
             Err(join_err) if join_err.is_panic() => {
                 // Task panicked - propagate panic regardless of parent cancellation

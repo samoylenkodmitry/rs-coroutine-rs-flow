@@ -257,13 +257,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_channel_flow() {
+        use rs_coroutine_core::{CoroutineScope, Dispatchers};
+
         let flow = channel_flow(|tx| async move {
             tx.send(1).await.ok();
             tx.send(2).await.ok();
             tx.send(3).await.ok();
         });
 
-        let result = flow.to_vec().await;
+        let scope = CoroutineScope::new(Dispatchers::main());
+        let result = scope.async_task(Dispatchers::main(), async move {
+            flow.to_vec().await
+        }).await_result().await.unwrap();
         assert_eq!(result, vec![1, 2, 3]);
     }
 
@@ -277,9 +282,13 @@ mod tests {
     #[tokio::test]
     async fn test_repeat_flow() {
         use crate::operators::FlowExt;
+        use rs_coroutine_core::{CoroutineScope, Dispatchers};
 
         let flow = repeat_flow(42).take(3);
-        let result = flow.to_vec().await;
+        let scope = CoroutineScope::new(Dispatchers::main());
+        let result = scope.async_task(Dispatchers::main(), async move {
+            flow.to_vec().await
+        }).await_result().await.unwrap();
         assert_eq!(result, vec![42, 42, 42]);
     }
 }
