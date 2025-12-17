@@ -1,11 +1,12 @@
 use futures::stream::Stream;
 use std::future::Future;
+use std::ops::ControlFlow;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::sync::mpsc;
 
-type FlowFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
+type FlowFuture = Pin<Box<dyn Future<Output = ControlFlow<()>> + Send>>;
 
 /// A collector that receives emitted values
 pub struct FlowCollector<T> {
@@ -17,7 +18,7 @@ impl<T> FlowCollector<T> {
     pub fn new<F, Fut>(emit_fn: F) -> Self
     where
         F: Fn(T) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = ()> + Send + 'static,
+        Fut: Future<Output = ControlFlow<()>> + Send + 'static,
     {
         Self {
             emit_fn: Arc::new(move |value| Box::pin(emit_fn(value))),
@@ -25,7 +26,7 @@ impl<T> FlowCollector<T> {
     }
 
     /// Emit a value to the collector
-    pub async fn emit(&self, value: T) {
+    pub async fn emit(&self, value: T) -> ControlFlow<()> {
         (self.emit_fn)(value).await
     }
 }
@@ -51,7 +52,7 @@ where
     pub fn new<F, Fut>(collect_fn: F) -> Self
     where
         F: Fn(FlowCollector<T>) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = ()> + Send + 'static,
+        Fut: Future<Output = ControlFlow<()>> + Send + 'static,
     {
         Self {
             collect_fn: Arc::new(move |collector| Box::pin(collect_fn(collector))),
@@ -62,16 +63,16 @@ where
     pub fn from_fn<F, Fut>(collect_fn: F) -> Self
     where
         F: Fn(FlowCollector<T>) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = ()> + Send + 'static,
+        Fut: Future<Output = ControlFlow<()>> + Send + 'static,
     {
         Self::new(collect_fn)
     }
 
     /// Collect values from this flow
-    pub async fn collect<F, Fut>(&self, on_value: F)
+    pub async fn collect<F, Fut>(&self, on_value: F) -> ControlFlow<()>
     where
         F: Fn(T) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = ()> + Send + 'static,
+        Fut: Future<Output = ControlFlow<()>> + Send + 'static,
     {
         let collector = FlowCollector::new(on_value);
         (self.collect_fn)(collector).await
@@ -145,20 +146,25 @@ where
         // Spawn collection task in current scope if available
         let stopped_clone = Arc::clone(&stopped);
         let task = spawn_in_scope(async move {
-            flow.collect(move |value| {
+            let _ = flow.collect(move |value| {
                 let tx = tx.clone();
                 let stopped = Arc::clone(&stopped_clone);
                 async move {
+                    use std::ops::ControlFlow::{Break, Continue};
+
                     // CRITICAL: Stop immediately if receiver dropped
                     // Without this check, we busy-loop burning CPU after stream is dropped
                     if stopped.load(Ordering::Relaxed) {
-                        return;
+                        return Break(());
                     }
 
                     // Try to send - if it fails, receiver is dropped, stop collecting
                     if tx.send(value).await.is_err() {
                         stopped.store(true, Ordering::Relaxed);
+                        return Break(());
                     }
+
+                    Continue(())
                 }
             })
             .await;
@@ -192,7 +198,7 @@ pub fn flow<T, F, Fut>(builder: F) -> Flow<T>
 where
     T: Send + 'static,
     F: Fn(FlowCollector<T>) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = ()> + Send + 'static,
+    Fut: Future<Output = ControlFlow<()>> + Send + 'static,
 {
     Flow::new(builder)
 }

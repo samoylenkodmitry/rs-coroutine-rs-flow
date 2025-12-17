@@ -3,6 +3,7 @@
 //! These operators allow you to combine multiple flows into one.
 
 use crate::flow::Flow;
+use std::ops::ControlFlow::{Break, Continue};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 
@@ -101,7 +102,7 @@ where
                 let latest1_clone = Arc::clone(&latest1);
                 let latest2_clone = Arc::clone(&latest2);
                 let task1 = spawn_in_scope(async move {
-                    upstream1
+                    let _ = upstream1
                         .collect(move |value| {
                             let tx = tx1.clone();
                             let latest1 = Arc::clone(&latest1_clone);
@@ -109,7 +110,11 @@ where
                             async move {
                                 *latest1.lock().await = Some(value.clone());
                                 let l2 = latest2.lock().await.clone();
-                                let _ = tx.send((Some(value), l2)).await;
+                                if tx.send((Some(value), l2)).await.is_err() {
+                                    Break(())
+                                } else {
+                                    Continue(())
+                                }
                             }
                         })
                         .await;
@@ -120,7 +125,7 @@ where
                 let latest1_clone = Arc::clone(&latest1);
                 let latest2_clone = Arc::clone(&latest2);
                 let task2 = spawn_in_scope(async move {
-                    upstream2
+                    let _ = upstream2
                         .collect(move |value| {
                             let tx = tx2.clone();
                             let latest1 = Arc::clone(&latest1_clone);
@@ -128,7 +133,11 @@ where
                             async move {
                                 *latest2.lock().await = Some(value.clone());
                                 let l1 = latest1.lock().await.clone();
-                                let _ = tx.send((l1, Some(value))).await;
+                                if tx.send((l1, Some(value))).await.is_err() {
+                                    Break(())
+                                } else {
+                                    Continue(())
+                                }
                             }
                         })
                         .await;
@@ -140,12 +149,16 @@ where
                 // Emit combined values
                 while let Some((v1, v2)) = rx.recv().await {
                     if let (Some(a), Some(b)) = (v1, v2) {
-                        collector.emit(transform(a, b)).await;
+                        match collector.emit(transform(a, b)).await {
+                            Continue(()) => {},
+                            Break(()) => break,
+                        }
                     }
                 }
 
                 task1.join().await;
                 task2.join().await;
+                Continue(())
             }
         })
     }
@@ -170,11 +183,15 @@ where
 
                 // Spawn task to collect from first flow in current scope
                 let task1 = spawn_in_scope(async move {
-                    upstream1
+                    let _ = upstream1
                         .collect(move |value| {
                             let tx = tx1.clone();
                             async move {
-                                let _ = tx.send(value).await;
+                                if tx.send(value).await.is_err() {
+                                    Break(())
+                                } else {
+                                    Continue(())
+                                }
                             }
                         })
                         .await;
@@ -182,11 +199,15 @@ where
 
                 // Spawn task to collect from second flow in current scope
                 let task2 = spawn_in_scope(async move {
-                    upstream2
+                    let _ = upstream2
                         .collect(move |value| {
                             let tx = tx2.clone();
                             async move {
-                                let _ = tx.send(value).await;
+                                if tx.send(value).await.is_err() {
+                                    Break(())
+                                } else {
+                                    Continue(())
+                                }
                             }
                         })
                         .await;
@@ -194,11 +215,15 @@ where
 
                 // Zip values
                 while let (Some(v1), Some(v2)) = (rx1.recv().await, rx2.recv().await) {
-                    collector.emit(transform(v1, v2)).await;
+                    match collector.emit(transform(v1, v2)).await {
+                        Continue(()) => {},
+                        Break(()) => break,
+                    }
                 }
 
                 task1.join().await;
                 task2.join().await;
+                Continue(())
             }
         })
     }
@@ -220,11 +245,12 @@ where
                 // Spawn task to collect from data flow in current scope
                 let latest_clone = Arc::clone(&latest);
                 let task1 = spawn_in_scope(async move {
-                    upstream
+                    let _ = upstream
                         .collect(move |value| {
                             let latest = Arc::clone(&latest_clone);
                             async move {
                                 *latest.lock().await = Some(value);
+                                Continue(())
                             }
                         })
                         .await;
@@ -232,11 +258,15 @@ where
 
                 // Spawn task to collect from sampler flow in current scope
                 let task2 = spawn_in_scope(async move {
-                    sampler
+                    let _ = sampler
                         .collect(move |_| {
                             let tx = tx.clone();
                             async move {
-                                let _ = tx.send(()).await;
+                                if tx.send(()).await.is_err() {
+                                    Break(())
+                                } else {
+                                    Continue(())
+                                }
                             }
                         })
                         .await;
@@ -245,12 +275,16 @@ where
                 // Emit sampled values
                 while let Some(()) = rx.recv().await {
                     if let Some(value) = latest.lock().await.clone() {
-                        collector.emit(value).await;
+                        match collector.emit(value).await {
+                            Continue(()) => {},
+                            Break(()) => break,
+                        }
                     }
                 }
 
                 task1.join().await;
                 task2.join().await;
+                Continue(())
             }
         })
     }
@@ -263,24 +297,27 @@ where
             async move {
                 // Collect from first flow
                 let collector_clone = collector.clone();
-                first
+                match first
                     .collect(move |value| {
                         let collector = collector_clone.clone();
                         async move {
-                            collector.emit(value).await;
+                            collector.emit(value).await
                         }
                     })
-                    .await;
+                    .await {
+                        Continue(()) => {},
+                        Break(()) => return Break(()),
+                    }
 
                 // Then collect from second flow
                 second
                     .collect(move |value| {
                         let collector = collector.clone();
                         async move {
-                            collector.emit(value).await;
+                            collector.emit(value).await
                         }
                     })
-                    .await;
+                    .await
             }
         })
     }
@@ -297,7 +334,10 @@ where
             async move {
                 // Emit initial values
                 for value in values {
-                    collector.emit(value).await;
+                    match collector.emit(value).await {
+                        Continue(()) => {},
+                        Break(()) => return Break(()),
+                    }
                 }
 
                 // Then collect from upstream
@@ -305,10 +345,10 @@ where
                     .collect(move |value| {
                         let collector = collector.clone();
                         async move {
-                            collector.emit(value).await;
+                            collector.emit(value).await
                         }
                     })
-                    .await;
+                    .await
             }
         })
     }
@@ -338,10 +378,14 @@ where
                 .map(|flow| {
                     let tx = tx.clone();
                     spawn_in_scope(async move {
-                        flow.collect(move |value| {
+                        let _ = flow.collect(move |value| {
                             let tx = tx.clone();
                             async move {
-                                let _ = tx.send(value).await;
+                                if tx.send(value).await.is_err() {
+                                    Break(())
+                                } else {
+                                    Continue(())
+                                }
                             }
                         })
                         .await;
@@ -354,13 +398,17 @@ where
 
             // Emit merged values
             while let Some(value) = rx.recv().await {
-                collector.emit(value).await;
+                match collector.emit(value).await {
+                    Continue(()) => {},
+                    Break(()) => break,
+                }
             }
 
             // Wait for all tasks
             for task in tasks {
                 task.join().await;
             }
+            Continue(())
         }
     })
 }
@@ -388,15 +436,15 @@ mod tests {
     #[tokio::test]
     async fn test_zip() {
         let flow1 = flow(|c| async move {
-            c.emit(1).await;
-            c.emit(2).await;
-            c.emit(3).await;
+            let _ = c.emit(1).await;
+            let _ = c.emit(2).await;
+            c.emit(3).await
         });
 
         let flow2 = flow(|c| async move {
-            c.emit("a").await;
-            c.emit("b").await;
-            c.emit("c").await;
+            let _ = c.emit("a").await;
+            let _ = c.emit("b").await;
+            c.emit("c").await
         });
 
         let zipped = flow1.zip(flow2, |a, b| format!("{}{}", a, b));
@@ -408,13 +456,13 @@ mod tests {
     #[tokio::test]
     async fn test_concat() {
         let flow1 = flow(|c| async move {
-            c.emit(1).await;
-            c.emit(2).await;
+            let _ = c.emit(1).await;
+            c.emit(2).await
         });
 
         let flow2 = flow(|c| async move {
-            c.emit(3).await;
-            c.emit(4).await;
+            let _ = c.emit(3).await;
+            c.emit(4).await
         });
 
         let concatenated = flow1.concat(flow2);
@@ -426,8 +474,8 @@ mod tests {
     #[tokio::test]
     async fn test_start_with() {
         let flow = flow(|c| async move {
-            c.emit(3).await;
-            c.emit(4).await;
+            let _ = c.emit(3).await;
+            c.emit(4).await
         })
         .start_with(vec![1, 2]);
 
@@ -438,16 +486,16 @@ mod tests {
     #[tokio::test]
     async fn test_merge() {
         let flow1 = flow(|c| async move {
-            c.emit(1).await;
+            let _ = c.emit(1).await;
             tokio::time::sleep(Duration::from_millis(50)).await;
-            c.emit(3).await;
+            c.emit(3).await
         });
 
         let flow2 = flow(|c| async move {
             tokio::time::sleep(Duration::from_millis(25)).await;
-            c.emit(2).await;
+            let _ = c.emit(2).await;
             tokio::time::sleep(Duration::from_millis(50)).await;
-            c.emit(4).await;
+            c.emit(4).await
         });
 
         let merged = merge(vec![flow1, flow2]);

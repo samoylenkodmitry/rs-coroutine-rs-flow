@@ -5,6 +5,7 @@
 
 use crate::flow::Flow;
 use std::future::Future;
+use std::ops::ControlFlow::{Break, Continue};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -26,8 +27,12 @@ where
             let iter = self.clone().into_iter();
             async move {
                 for item in iter {
-                    collector.emit(item).await;
+                    match collector.emit(item).await {
+                        Continue(()) => {},
+                        Break(()) => return Break(()),
+                    }
                 }
+                Continue(())
             }
         })
     }
@@ -35,7 +40,7 @@ where
 
 /// Create a flow that emits no values
 pub fn empty_flow<T: Send + 'static>() -> Flow<T> {
-    Flow::new(|_collector| async move {})
+    Flow::new(|_collector| async move { Continue(()) })
 }
 
 /// Create a flow from a single value
@@ -43,7 +48,7 @@ pub fn flow_of_one<T: Send + Clone + Sync + 'static>(value: T) -> Flow<T> {
     Flow::new(move |collector| {
         let value = value.clone();
         async move {
-            collector.emit(value).await;
+            collector.emit(value).await
         }
     })
 }
@@ -103,10 +108,14 @@ where
             let producer = spawn_in_scope(fut);
 
             while let Some(value) = rx.recv().await {
-                collector.emit(value).await;
+                match collector.emit(value).await {
+                    Continue(()) => {},
+                    Break(()) => break,
+                }
             }
 
             producer.join().await;
+            Continue(())
         }
     })
 }
@@ -131,8 +140,12 @@ where
         let generator = Arc::clone(&generator);
         async move {
             while let Some(value) = generator() {
-                collector.emit(value).await;
+                match collector.emit(value).await {
+                    Continue(()) => {},
+                    Break(()) => return Break(()),
+                }
             }
+            Continue(())
         }
     })
 }
@@ -149,7 +162,10 @@ pub fn repeat_flow<T: Clone + Send + Sync + 'static>(value: T) -> Flow<T> {
         let value = value.clone();
         async move {
             loop {
-                collector.emit(value.clone()).await;
+                match collector.emit(value.clone()).await {
+                    Continue(()) => {},
+                    Break(()) => return Break(()),
+                }
             }
         }
     })
@@ -168,7 +184,10 @@ pub fn interval_flow(period: std::time::Duration) -> Flow<u64> {
 
         loop {
             interval.tick().await;
-            collector.emit(counter).await;
+            match collector.emit(counter).await {
+                Continue(()) => {},
+                Break(()) => return Break(()),
+            }
             counter += 1;
         }
     })

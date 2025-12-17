@@ -1,5 +1,6 @@
 use super::*;
 use std::future::Future;
+use std::ops::ControlFlow::{Break, Continue};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -25,10 +26,10 @@ where
                         let collector = collector.clone();
                         async move {
                             let mapped = f(value).await;
-                            collector.emit(mapped).await;
+                            collector.emit(mapped).await
                         }
                     })
-                    .await;
+                    .await
             }
         })
     }
@@ -50,11 +51,13 @@ where
                         let collector = collector.clone();
                         async move {
                             if predicate(&value).await {
-                                collector.emit(value).await;
+                                collector.emit(value).await
+                            } else {
+                                Continue(())
                             }
                         }
                     })
-                    .await;
+                    .await
             }
         })
     }
@@ -66,7 +69,7 @@ where
             let upstream = self.clone();
             async move {
                 if count == 0 {
-                    return;
+                    return Continue(());
                 }
 
                 let (tx, mut rx) = mpsc::channel::<T>(1);
@@ -75,17 +78,20 @@ where
 
                 // Spawn upstream collection in current scope if available
                 let producer = spawn_in_scope(async move {
-                    upstream
+                    let _ = upstream
                         .collect(move |value| {
                             let tx = tx.clone();
                             let done = Arc::clone(&done_clone);
                             async move {
                                 if done.load(Ordering::SeqCst) {
                                     // Stop sending - downstream is done
-                                    return;
+                                    return Break(());
                                 }
                                 // This will block if receiver is full, providing backpressure
-                                let _ = tx.send(value).await;
+                                if tx.send(value).await.is_err() {
+                                    return Break(());
+                                }
+                                Continue(())
                             }
                         })
                         .await;
@@ -96,8 +102,10 @@ where
                 let mut received = 0;
                 while received < count {
                     if let Some(value) = rx.recv().await {
-                        collector.emit(value).await;
-                        received += 1;
+                        match collector.emit(value).await {
+                            Continue(()) => received += 1,
+                            Break(()) => break,
+                        }
                     } else {
                         break; // Upstream completed
                     }
@@ -107,6 +115,7 @@ where
                 done.store(true, Ordering::SeqCst);
                 drop(rx);
                 drop(producer); // Explicitly cancel the producer task
+                Continue(())
             }
         })
     }
@@ -124,7 +133,7 @@ where
                 // Spawn upstream collection in current scope if available
                 let stopped_clone = Arc::clone(&stopped);
                 let producer = spawn_in_scope(async move {
-                    upstream
+                    let _ = upstream
                         .collect(move |value| {
                             let tx = tx.clone();
                             let stopped = Arc::clone(&stopped_clone);
@@ -132,13 +141,15 @@ where
                                 // CRITICAL: Stop immediately if receiver dropped
                                 // Without this check, we busy-loop burning CPU
                                 if stopped.load(Ordering::Relaxed) {
-                                    return;
+                                    return Break(());
                                 }
 
                                 // Try to send - if it fails, receiver is dropped, stop collecting
                                 if tx.send(value).await.is_err() {
                                     stopped.store(true, Ordering::Relaxed);
+                                    return Break(());
                                 }
+                                Continue(())
                             }
                         })
                         .await;
@@ -146,11 +157,15 @@ where
                 .into_cancel_on_drop();
 
                 while let Some(value) = rx.recv().await {
-                    collector.emit(value).await;
+                    match collector.emit(value).await {
+                        Continue(()) => {},
+                        Break(()) => break,
+                    }
                 }
 
                 // Producer completes naturally or is cancelled when guard drops
                 drop(producer);
+                Continue(())
             }
         })
     }
@@ -164,19 +179,27 @@ where
 
                 let producer_dispatcher = dispatcher.clone();
                 producer_dispatcher.spawn(async move {
-                    upstream
+                    let _ = upstream
                         .collect(move |value| {
                             let tx = tx.clone();
                             async move {
-                                let _ = tx.send(value).await;
+                                if tx.send(value).await.is_err() {
+                                    Break(())
+                                } else {
+                                    Continue(())
+                                }
                             }
                         })
                         .await;
                 });
 
                 while let Some(value) = rx.recv().await {
-                    collector.emit(value).await;
+                    match collector.emit(value).await {
+                        Continue(()) => {},
+                        Break(()) => break,
+                    }
                 }
+                Continue(())
             }
         })
     }
@@ -204,13 +227,17 @@ where
                     spawn_in_scope({
                         let f = Arc::clone(&f);
                         async move {
-                            upstream
+                            let _ = upstream
                                 .collect(move |value| {
                                     let f = Arc::clone(&f);
                                     let tx = tx.clone();
                                     async move {
                                         let flow = f(value).await;
-                                        let _ = tx.send(flow).await;
+                                        if tx.send(flow).await.is_err() {
+                                            Break(())
+                                        } else {
+                                            Continue(())
+                                        }
                                     }
                                 })
                                 .await;
@@ -245,7 +272,10 @@ where
                                     // Finish current stream if any, then exit
                                     if let Some(stream) = current_stream.as_mut() {
                                         while let Some(value) = stream.next().await {
-                                            collector.emit(value).await;
+                                            match collector.emit(value).await {
+                                                Continue(()) => {},
+                                                Break(()) => break,
+                                            }
                                         }
                                     }
                                     break;
@@ -263,7 +293,10 @@ where
                             }
                         } => {
                             if let Some(v) = value {
-                                collector.emit(v).await;
+                                match collector.emit(v).await {
+                                    Continue(()) => {},
+                                    Break(()) => break,
+                                }
                             } else {
                                 // Current inner flow completed, clear it and wait for next
                                 current_stream = None;
@@ -274,6 +307,7 @@ where
 
                 // Producer guard will cancel on drop
                 drop(producer);
+                Continue(())
             }
         })
     }
@@ -294,10 +328,10 @@ where
                         let collector = collector.clone();
                         async move {
                             let mapped = f(value);
-                            collector.emit(mapped).await;
+                            collector.emit(mapped).await
                         }
                     })
-                    .await;
+                    .await
             }
         })
     }
@@ -318,11 +352,13 @@ where
                         let collector = collector.clone();
                         async move {
                             if predicate(&value) {
-                                collector.emit(value).await;
+                                collector.emit(value).await
+                            } else {
+                                Continue(())
                             }
                         }
                     })
-                    .await;
+                    .await
             }
         })
     }
@@ -360,13 +396,13 @@ where
                                 .collect(move |inner_value| {
                                     let collector = collector.clone();
                                     async move {
-                                        collector.emit(inner_value).await;
+                                        collector.emit(inner_value).await
                                     }
                                 })
-                                .await;
+                                .await
                         }
                     })
-                    .await;
+                    .await
             }
         })
     }
@@ -399,10 +435,10 @@ where
                         let collector = collector.clone();
                         async move {
                             f(&value);
-                            collector.emit(value).await;
+                            collector.emit(value).await
                         }
                     })
-                    .await;
+                    .await
             }
         })
     }
@@ -424,10 +460,10 @@ where
                         let collector = collector.clone();
                         async move {
                             f(&value).await;
-                            collector.emit(value).await;
+                            collector.emit(value).await
                         }
                     })
-                    .await;
+                    .await
             }
         })
     }
@@ -444,11 +480,13 @@ where
                         async move {
                             let current = dropped.fetch_add(1, Ordering::SeqCst);
                             if current >= count {
-                                collector.emit(value).await;
+                                collector.emit(value).await
+                            } else {
+                                Continue(())
                             }
                         }
                     })
-                    .await;
+                    .await
             }
         })
     }
@@ -473,14 +511,16 @@ where
                             if dropping.load(Ordering::SeqCst) {
                                 if !predicate(&value) {
                                     dropping.store(false, Ordering::SeqCst);
-                                    collector.emit(value).await;
+                                    collector.emit(value).await
+                                } else {
+                                    Continue(())
                                 }
                             } else {
-                                collector.emit(value).await;
+                                collector.emit(value).await
                             }
                         }
                     })
-                    .await;
+                    .await
             }
         })
     }
@@ -503,13 +543,14 @@ where
                         let done = Arc::clone(&done);
                         async move {
                             if !done.load(Ordering::SeqCst) && predicate(&value) {
-                                collector.emit(value).await;
+                                collector.emit(value).await
                             } else {
                                 done.store(true, Ordering::SeqCst);
+                                Break(())
                             }
                         }
                     })
-                    .await;
+                    .await
             }
         })
     }
@@ -535,11 +576,13 @@ where
                             if should_emit {
                                 *guard = Some(value.clone());
                                 drop(guard);
-                                collector.emit(value).await;
+                                collector.emit(value).await
+                            } else {
+                                Continue(())
                             }
                         }
                     })
-                    .await;
+                    .await
             }
         })
     }
@@ -571,11 +614,13 @@ where
                             if should_emit {
                                 *guard = Some(key);
                                 drop(guard);
-                                collector.emit(value).await;
+                                collector.emit(value).await
+                            } else {
+                                Continue(())
                             }
                         }
                     })
-                    .await;
+                    .await
             }
         })
     }
