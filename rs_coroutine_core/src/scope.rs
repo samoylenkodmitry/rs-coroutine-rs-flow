@@ -9,36 +9,22 @@ tokio::task_local! {
     pub static CURRENT_SCOPE: Arc<CoroutineScope>;
 }
 
-/// Guard that ensures job.complete() is called even on panic
-/// This is critical for correctness - without it, panics in spawned tasks
-/// would leave the job in an incomplete state forever.
-struct JobCompletionGuard {
-    job: JobHandle,
-}
-
-impl JobCompletionGuard {
-    fn new(job: JobHandle) -> Self {
-        Self { job }
-    }
-}
-
-impl Drop for JobCompletionGuard {
-    fn drop(&mut self) {
-        // Always mark job as complete, even on panic unwind
-        self.job.complete();
-    }
-}
-
 /// Future returned by with_dispatcher that cancels the job on drop
 ///
 /// CRITICAL: This prevents task detachment when the future is dropped
 /// (e.g., in a timeout or select!). The cancel token is cancelled immediately,
 /// signaling the spawned task to stop.
+///
+/// CRITICAL: This Future is also responsible for completing the job when the
+/// task finishes. It polls the join_handle directly and reports the outcome
+/// to the JobHandle.
 struct WithDispatcherFuture<T> {
     join_handle: Option<BoxedJoinHandle>,
     rx: oneshot::Receiver<Result<T, TaskError>>,
     parent_token: CancelToken,
     child_cancel_token: CancelToken,
+    job: JobHandle,
+    cancel_token: CancelToken,
 }
 
 impl<T> Drop for WithDispatcherFuture<T> {
@@ -73,16 +59,19 @@ where
                 let handle_pin = std::pin::Pin::new(&mut handle);
                 match handle_pin.poll(cx) {
                     std::task::Poll::Ready(Ok(())) => {
-                        // Task completed - return Cancelled since parent was cancelled
+                        // Task completed - complete the job with Cancelled
+                        self.job.complete_with(Err(TaskError::Cancelled));
                         return std::task::Poll::Ready(Err(TaskError::Cancelled));
                     }
                     std::task::Poll::Ready(Err(join_err)) if join_err.is_panic() => {
                         // Task panicked - propagate panic even though parent cancelled
                         let panic_msg = crate::error::extract_panic_message(join_err);
+                        self.job.complete_with(Err(TaskError::Panicked(panic_msg.clone())));
                         return std::task::Poll::Ready(Err(TaskError::Panicked(panic_msg)));
                     }
                     std::task::Poll::Ready(Err(_)) => {
                         // Task aborted
+                        self.job.complete_with(Err(TaskError::Aborted));
                         return std::task::Poll::Ready(Err(TaskError::Aborted));
                     }
                     std::task::Poll::Pending => {
@@ -100,18 +89,29 @@ where
             let handle_pin = std::pin::Pin::new(&mut handle);
             match handle_pin.poll(cx) {
                 std::task::Poll::Ready(Ok(())) => {
-                    // Task completed - get result from oneshot
+                    // Task completed - get result from oneshot and complete the job
                     let rx_pin = std::pin::Pin::new(&mut self.rx);
                     match rx_pin.poll(cx) {
                         std::task::Poll::Ready(Ok(result)) => {
+                            // Complete the job based on task outcome
+                            if self.cancel_token.is_cancelled() {
+                                self.job.complete_with(Err(TaskError::Cancelled));
+                            } else {
+                                match &result {
+                                    Ok(_) => self.job.complete_with(Ok(())),
+                                    Err(e) => self.job.complete_with(Err(e.clone())),
+                                }
+                            }
                             return std::task::Poll::Ready(result);
                         }
                         std::task::Poll::Ready(Err(_)) => {
                             // Sender dropped without sending
+                            self.job.complete_with(Err(TaskError::Aborted));
                             return std::task::Poll::Ready(Err(TaskError::Aborted));
                         }
                         std::task::Poll::Pending => {
                             // This shouldn't happen - task completed but didn't send?
+                            self.job.complete_with(Err(TaskError::Aborted));
                             return std::task::Poll::Ready(Err(TaskError::Aborted));
                         }
                     }
@@ -119,10 +119,12 @@ where
                 std::task::Poll::Ready(Err(join_err)) if join_err.is_panic() => {
                     // Task panicked
                     let panic_msg = crate::error::extract_panic_message(join_err);
+                    self.job.complete_with(Err(TaskError::Panicked(panic_msg.clone())));
                     return std::task::Poll::Ready(Err(TaskError::Panicked(panic_msg)));
                 }
                 std::task::Poll::Ready(Err(_)) => {
                     // Task aborted
+                    self.job.complete_with(Err(TaskError::Aborted));
                     return std::task::Poll::Ready(Err(TaskError::Aborted));
                 }
                 std::task::Poll::Pending => {
@@ -167,18 +169,18 @@ impl CoroutineScope {
         let job = JobHandle::new();  // New job for launched coroutine
         let cancel_token = self.cancel_token.clone();
 
-        let job_clone = job.clone();
         let job_for_observer = job.clone();
+        let cancel_token_for_task = cancel_token.clone();
 
         let join_handle = dispatcher.spawn(async move {
-            // Create guard FIRST - ensures job.complete() is called even on panic
-            let _guard = JobCompletionGuard::new(job_clone);
+            // NO GUARD - Observer is single source of truth for outcome
+            // This prevents the race where guard stores Ok() before observer detects panic
 
             CURRENT_SCOPE
                 .scope(scope.clone(), async move {
                     // CRITICAL: Check cancellation BEFORE starting work
                     // This prevents "already cancelled but ran anyway" races
-                    if cancel_token.is_cancelled() {
+                    if cancel_token_for_task.is_cancelled() {
                         return;
                     }
 
@@ -187,7 +189,7 @@ impl CoroutineScope {
                     // This ensures scope.cancel() actually stops the future
                     tokio::select! {
                         biased;
-                        _ = cancel_token.cancelled() => {
+                        _ = cancel_token_for_task.cancelled() => {
                             // Scope was cancelled - stop execution immediately
                         }
                         _ = fut => {
@@ -196,18 +198,25 @@ impl CoroutineScope {
                     }
                 })
                 .await;
-            // Guard's Drop will call job.complete() here
         });
 
-        // Spawn observer task to detect panics and store in job outcome
-        // CRITICAL: This prevents panics from looking like success
+        // Spawn observer task - SINGLE SOURCE OF TRUTH for job outcome
+        // CRITICAL: This is the ONLY place that completes the job
+        // Prevents panic masking race where guard completes as Ok before observer detects panic
         tokio::spawn(async move {
             match join_handle.await {
                 Ok(()) => {
-                    // Task completed normally (guard already called complete())
+                    // Task completed - check if it was due to cancellation or normal completion
+                    if cancel_token.is_cancelled() {
+                        // Cancellation won the race
+                        job_for_observer.complete_with(Err(TaskError::Cancelled));
+                    } else {
+                        // Normal completion
+                        job_for_observer.complete_with(Ok(()));
+                    }
                 }
                 Err(join_err) if join_err.is_panic() => {
-                    // Task panicked - store panic in job outcome
+                    // Task panicked - highest priority outcome
                     let panic_msg = crate::error::extract_panic_message(join_err);
                     job_for_observer.complete_with(Err(TaskError::Panicked(panic_msg)));
                 }
@@ -252,12 +261,13 @@ impl CoroutineScope {
         });
         let cancel_token = child_scope.cancel_token.clone();
         let job = child_scope.job.clone();
+        let job_for_future = job.clone();
         let child_cancel_token_for_guard = child_scope.cancel_token.clone();
+        let cancel_token_for_future = cancel_token.clone();
         let parent_token = self.cancel_token.clone();
 
         let join_handle = dispatcher.spawn(async move {
-            // Create guard FIRST - ensures job.complete() is called even on panic
-            let _guard = JobCompletionGuard::new(job);
+            // NO GUARD - WithDispatcherFuture will be single source of truth for job outcome
 
             // CRITICAL: Check cancellation BEFORE starting work
             if cancel_token.is_cancelled() {
@@ -276,16 +286,18 @@ impl CoroutineScope {
             }).await;
 
             let _ = tx.send(result);
-            // Guard's Drop will call job.complete() here
         });
 
         // CRITICAL: Return a future that cancels the token on drop
         // This prevents detachment when the outer future is dropped (e.g., in timeout)
+        // The future is also responsible for completing the job when it polls the join_handle
         WithDispatcherFuture {
             join_handle: Some(join_handle),
             rx,
             parent_token,
             child_cancel_token: child_cancel_token_for_guard,
+            job: job_for_future,
+            cancel_token: cancel_token_for_future,
         }
     }
 
@@ -306,11 +318,11 @@ impl CoroutineScope {
         });
         let cancel_token = child_scope.cancel_token.clone();
         let job = child_scope.job.clone();
-        let job_for_spawn = job.clone();
+        let job_for_observer = job.clone();
+        let cancel_token_for_observer = cancel_token.clone();
 
         let join_handle = dispatcher.spawn(async move {
-            // Create guard FIRST - ensures job.complete() is called even on panic
-            let _guard = JobCompletionGuard::new(job_for_spawn);
+            // NO GUARD - Observer will be single source of truth for job outcome
 
             // CRITICAL: Check cancellation BEFORE starting work
             if cancel_token.is_cancelled() {
@@ -329,12 +341,31 @@ impl CoroutineScope {
             }).await;
 
             let _ = tx.send(result);
-            // Guard's Drop will call job.complete() here
+        });
+
+        // Spawn observer to complete the job and detect panics
+        tokio::spawn(async move {
+            match join_handle.await {
+                Ok(()) => {
+                    // Task completed - check if cancelled or normal
+                    if cancel_token_for_observer.is_cancelled() {
+                        job_for_observer.complete_with(Err(TaskError::Cancelled));
+                    } else {
+                        job_for_observer.complete_with(Ok(()));
+                    }
+                }
+                Err(join_err) if join_err.is_panic() => {
+                    let panic_msg = crate::error::extract_panic_message(join_err);
+                    job_for_observer.complete_with(Err(TaskError::Panicked(panic_msg)));
+                }
+                Err(_) => {
+                    job_for_observer.complete_with(Err(TaskError::Aborted));
+                }
+            }
         });
 
         Deferred {
             rx,
-            join_handle,
             job,
             parent_cancel_token: self.cancel_token.clone(),
         }
@@ -357,7 +388,6 @@ impl CoroutineScope {
 /// A deferred value that can be awaited
 pub struct Deferred<T> {
     rx: oneshot::Receiver<Result<T, TaskError>>,
-    join_handle: BoxedJoinHandle,
     job: JobHandle,
     parent_cancel_token: CancelToken,
 }
@@ -373,39 +403,21 @@ impl<T> Deferred<T> {
     /// - `TaskError::Panicked` if the task panics
     /// - `TaskError::Aborted` if the task is dropped before completion
     pub async fn await_result(self) -> Result<T, TaskError> {
-        // Race between parent cancellation and task completion (including panics)
-        // CRITICAL: Must await join_handle exactly ONCE (no double-polling, no detach)
+        // Observer handles JoinHandle and completes the job
+        // We just need to wait for completion and read the result from oneshot
 
-        // Extract and pin the join_handle so we can poll it in select! without moving
-        let join_handle = self.join_handle;
-        tokio::pin!(join_handle);
-
-        let join_result = tokio::select! {
+        // Race between parent cancellation and task completion
+        tokio::select! {
             biased;
             _ = self.parent_cancel_token.cancelled() => {
-                // Parent cancelled - still await to avoid orphaning/detaching task
-                (&mut join_handle).await
+                // Parent cancelled - wait for job to complete and return Cancelled
+                // We don't read the task's result because parent cancellation takes precedence
+                self.job.join().await;
+                Err(TaskError::Cancelled)
             }
-            res = &mut join_handle => res,
-        };
-
-        match join_result {
-            Ok(()) => {
-                // Task completed successfully - ALWAYS retrieve result regardless of parent cancellation
-                // Priority: If the task finished computing a value, that value should be returned
-                // even if the parent scope was cancelled during execution.
-                // Cancellation means "stop if you haven't finished", not "pretend you didn't finish".
-                // RecvError only occurs if sender dropped without sending (runtime abort/shutdown)
-                self.rx.await.unwrap_or(Err(TaskError::Aborted))
-            }
-            Err(join_err) if join_err.is_panic() => {
-                // Task panicked - propagate panic regardless of parent cancellation
-                let panic_msg = crate::error::extract_panic_message(join_err);
-                Err(TaskError::Panicked(panic_msg))
-            }
-            Err(_) => {
-                // Task cancelled by runtime shutdown
-                Err(TaskError::Aborted)
+            result = self.rx => {
+                // Result arrived - return it
+                result.unwrap_or(Err(TaskError::Aborted))
             }
         }
     }
@@ -427,22 +439,12 @@ impl<T> Deferred<T> {
     /// Note: This will NOT return `TaskError::Cancelled` due to parent cancellation.
     pub async fn await_uninterruptible(self) -> Result<T, TaskError> {
         // Do NOT race against parent cancellation - just wait for task completion
-        match self.join_handle.await {
-            Ok(()) => {
-                // Task completed normally, get result from oneshot
-                // RecvError only occurs if sender dropped without sending (runtime abort/shutdown)
-                self.rx.await.unwrap_or(Err(TaskError::Aborted))
-            }
-            Err(join_err) if join_err.is_panic() => {
-                // Task panicked - use JoinError to get panic info (proper Tokio idiom)
-                let panic_msg = crate::error::extract_panic_message(join_err);
-                Err(TaskError::Panicked(panic_msg))
-            }
-            Err(_) => {
-                // Task cancelled by runtime shutdown
-                Err(TaskError::Aborted)
-            }
-        }
+        // The observer handles the join_handle and completes the job
+        self.job.join().await;
+
+        // Job completed - get result from oneshot
+        // RecvError only occurs if sender dropped without sending (runtime abort/shutdown)
+        self.rx.await.unwrap_or(Err(TaskError::Aborted))
     }
 
     /// Get the job handle

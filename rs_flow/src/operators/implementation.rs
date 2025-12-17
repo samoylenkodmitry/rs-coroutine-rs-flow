@@ -5,6 +5,15 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+/// Default buffer size for converting Flows to streams
+///
+/// This controls the channel buffer size used when materializing a Flow into a stream.
+/// A larger buffer allows more values to be buffered in memory, which can improve
+/// throughput at the cost of memory usage.
+///
+/// 16 is a reasonable default that balances memory usage with performance for most use cases.
+const DEFAULT_STREAM_BUFFER_SIZE: usize = 16;
+
 impl<T> FlowExt<T> for Flow<T>
 where
     T: Send + 'static,
@@ -265,7 +274,7 @@ where
                             match new_flow_opt {
                                 Some(new_flow) => {
                                     // Drop old stream (cooperative cancellation via scope if available)
-                                    current_stream = Some(new_flow.to_stream(16));
+                                    current_stream = Some(new_flow.to_stream(DEFAULT_STREAM_BUFFER_SIZE));
                                 }
                                 None => {
                                     // Producer is done, no more flows coming

@@ -154,8 +154,8 @@ impl JobHandle {
     /// - If outcome is `Ok` but new outcome is an error, upgrade to the error
     ///
     /// This prevents the race where:
-    /// 1. JobCompletionGuard stores `Ok(())` on normal completion
-    /// 2. Observer detects panic and tries to store `Panicked`
+    /// 1. Observer might try to store `Ok(())` for normal completion
+    /// 2. Later, another thread detects panic and tries to store `Panicked`
     /// 3. Without upgrades, panic would be lost and job reports success
     ///
     /// ## Thread Safety
