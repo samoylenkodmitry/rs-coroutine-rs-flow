@@ -25,9 +25,44 @@ impl<T> FlowCollector<T> {
         }
     }
 
-    /// Emit a value to the collector
+    /// Emit a value to the collector (with control flow)
+    ///
+    /// Returns `ControlFlow::Break` if the downstream consumer wants to stop
+    /// receiving values (e.g., after `take(n)` reaches its limit).
+    ///
+    /// For simple emission without checking termination signals, use `emit_value()`.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Check for early termination
+    /// for i in 1..=100 {
+    ///     match collector.emit(i).await {
+    ///         Continue(()) => {}, // Keep going
+    ///         Break(()) => break, // Stop early
+    ///     }
+    /// }
+    /// ```
     pub async fn emit(&self, value: T) -> ControlFlow<()> {
         (self.emit_fn)(value).await
+    }
+
+    /// Emit a value to the collector (ergonomic API)
+    ///
+    /// This is the ergonomic alternative to `emit()` that doesn't return
+    /// `ControlFlow`. Use this when you don't need to check for early termination.
+    ///
+    /// # Example
+    /// ```ignore
+    /// for i in 1..=5 {
+    ///     collector.emit_value(i).await;
+    /// }
+    /// ```
+    ///
+    /// Note: If downstream consumers signal early termination (e.g., via `take()`),
+    /// this will silently ignore it and continue emitting. Use `emit()` if you
+    /// need to respect termination signals.
+    pub async fn emit_value(&self, value: T) {
+        let _ = self.emit(value).await;
     }
 }
 
@@ -68,7 +103,16 @@ where
         Self::new(collect_fn)
     }
 
-    /// Collect values from this flow
+    /// Collect values from this flow with control flow support
+    ///
+    /// This is the low-level API that allows operators to signal early termination
+    /// via `ControlFlow::Break`. Most users should use `for_each()` instead.
+    ///
+    /// Use this when you need to:
+    /// - Stop upstream emission early (e.g., implementing `take`)
+    /// - Propagate termination signals between operators
+    ///
+    /// For simple collection without early termination, use `for_each()`.
     pub async fn collect<F, Fut>(&self, on_value: F) -> ControlFlow<()>
     where
         F: Fn(T) -> Fut + Send + Sync + 'static,
@@ -76,6 +120,35 @@ where
     {
         let collector = FlowCollector::new(on_value);
         (self.collect_fn)(collector).await
+    }
+
+    /// Perform an action for each value in the flow (ergonomic API)
+    ///
+    /// This is the ergonomic alternative to `collect()` for users who don't need
+    /// early termination control. The closure returns `()` instead of `ControlFlow<()>`.
+    ///
+    /// # Example
+    /// ```ignore
+    /// flow.for_each(|value| async move {
+    ///     println!("Got: {}", value);
+    /// }).await;
+    /// ```
+    ///
+    /// If you need to stop collection early based on values, use `take()`, `take_while()`,
+    /// or other operators before calling `for_each()`.
+    pub async fn for_each<F, Fut>(&self, f: F)
+    where
+        F: Fn(T) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let f = Arc::new(f);
+        let _ = self.collect(move |value| {
+            let f = Arc::clone(&f);
+            async move {
+                f(value).await;
+                ControlFlow::Continue(())
+            }
+        }).await;
     }
 
     /// Convert this Flow to a Stream
@@ -193,7 +266,12 @@ impl<T> Clone for Flow<T> {
     }
 }
 
-/// Builder function for creating flows
+/// Builder function for creating flows (with control flow support)
+///
+/// This is the low-level builder that requires returning `ControlFlow<()>`.
+/// For simpler flow creation, use `flow_fn()` which doesn't require ControlFlow.
+///
+/// Use this when you need to handle early termination signals from downstream.
 pub fn flow<T, F, Fut>(builder: F) -> Flow<T>
 where
     T: Send + 'static,
@@ -201,6 +279,38 @@ where
     Fut: Future<Output = ControlFlow<()>> + Send + 'static,
 {
     Flow::new(builder)
+}
+
+/// Builder function for creating flows (ergonomic API)
+///
+/// This is the ergonomic alternative to `flow()` that doesn't require
+/// returning `ControlFlow<()>`. Perfect for simple flow creation.
+///
+/// # Example
+/// ```ignore
+/// let numbers = flow_fn(|collector| async move {
+///     for i in 1..=5 {
+///         collector.emit_value(i).await;
+///     }
+/// });
+/// ```
+///
+/// If you need to handle early termination (e.g., responding to downstream
+/// `take()`), use `flow()` instead and check the ControlFlow result from `emit()`.
+pub fn flow_fn<T, F, Fut>(builder: F) -> Flow<T>
+where
+    T: Send + 'static,
+    F: Fn(FlowCollector<T>) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let builder = Arc::new(builder);
+    Flow::new(move |collector| {
+        let builder = Arc::clone(&builder);
+        async move {
+            builder(collector).await;
+            ControlFlow::Continue(())
+        }
+    })
 }
 
 /// Macro to create a flow with a builder block
