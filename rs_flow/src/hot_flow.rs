@@ -1,4 +1,5 @@
 use crate::flow::Flow;
+use std::ops::ControlFlow::{Break, Continue};
 use tokio::sync::{broadcast, watch};
 
 /// A hot flow that multicasts values to all collectors
@@ -32,8 +33,12 @@ where
             let mut rx = rx.resubscribe();
             async move {
                 while let Ok(value) = rx.recv().await {
-                    collector.emit(value).await;
+                    match collector.emit(value).await {
+                        Continue(()) => {},
+                        Break(()) => return Break(()),
+                    }
                 }
+                Continue(())
             }
         })
     }
@@ -92,13 +97,20 @@ where
             async move {
                 // Emit the current value first
                 let current = rx.borrow_and_update().clone();
-                collector.emit(current).await;
+                match collector.emit(current).await {
+                    Continue(()) => {},
+                    Break(()) => return Break(()),
+                }
 
                 // Then emit all subsequent updates
                 while rx.changed().await.is_ok() {
                     let value = rx.borrow_and_update().clone();
-                    collector.emit(value).await;
+                    match collector.emit(value).await {
+                        Continue(()) => {},
+                        Break(()) => return Break(()),
+                    }
                 }
+                Continue(())
             }
         })
     }

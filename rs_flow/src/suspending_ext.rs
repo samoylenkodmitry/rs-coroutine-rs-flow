@@ -17,7 +17,7 @@ where
             let suspending = suspending.clone();
             async move {
                 let value = suspending.call().await;
-                collector.emit(value).await;
+                collector.emit(value).await
             }
         })
     }
