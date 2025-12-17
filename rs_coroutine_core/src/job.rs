@@ -97,23 +97,35 @@ impl JobHandle {
     ///
     /// ## Correctness
     ///
-    /// Checks `is_completed` BEFORE awaiting notification to avoid missed wakeup race:
-    /// - If already completed, returns immediately
-    /// - Otherwise, awaits notification (which is guaranteed to come after we checked)
+    /// Uses the correct Notify pattern to avoid missed wakeup race:
+    /// 1. Create the notified() future FIRST (registers waiter)
+    /// 2. Then check is_completed flag
+    /// 3. If completed, return (dropping the future)
+    /// 4. Otherwise await the future
+    ///
+    /// This ensures the waiter is registered BEFORE we check completion,
+    /// preventing the race where notify_waiters() fires between check and await.
     pub async fn join(&self) {
-        // CRITICAL: Check completion state BEFORE creating notified() future
-        // This prevents the race where complete_with() fires between now and await
+        // CRITICAL: Create notified future BEFORE checking flag
+        // This registers us as a waiter immediately
+        let notified = self.completed.notified();
+
+        // Now check if already completed
         if self.is_completed.load(Ordering::Acquire) {
-            return;
+            return;  // Drop the notified future, we don't need it
         }
-        self.completed.notified().await;
+
+        // Wait for notification (we're already registered as a waiter)
+        notified.await;
     }
 
     /// Wait for this job to complete and get the outcome
     pub async fn join_result(&self) -> Result<(), TaskError> {
-        // CRITICAL: Check completion state BEFORE awaiting notification (same as join())
+        // CRITICAL: Same pattern as join() - create notified BEFORE checking flag
+        let notified = self.completed.notified();
+
         if !self.is_completed.load(Ordering::Acquire) {
-            self.completed.notified().await;
+            notified.await;
         }
 
         // Get the outcome (using std::sync::Mutex, so this is a blocking lock)

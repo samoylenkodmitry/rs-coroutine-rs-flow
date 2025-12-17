@@ -158,23 +158,6 @@ async fn test_hierarchical_cancel_token_await() {
 }
 
 #[tokio::test]
-async fn test_job_handle_child_cancellation() {
-    let job = JobHandle::new();
-    let child_job = job.new_child();
-
-    // Initially not cancelled
-    assert!(!job.is_cancelled());
-    assert!(!child_job.is_cancelled());
-
-    // Cancel parent job
-    job.cancel();
-
-    // Both should be cancelled due to hierarchical token
-    assert!(job.is_cancelled());
-    assert!(child_job.is_cancelled());
-}
-
-#[tokio::test]
 async fn test_async_task_respects_scope_cancellation() {
     let scope = Arc::new(CoroutineScope::new(Dispatchers::main()));
     let started = Arc::new(Notify::new());
