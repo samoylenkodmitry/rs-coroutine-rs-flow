@@ -319,24 +319,19 @@ mod tests {
     async fn test_take_operator() {
         let numbers: Flow<i32> = flow_fn(|collector| async move {
             for i in 1..=10 {
-                match collector.emit(i).await {
-                    std::ops::ControlFlow::Continue(()) => {},
-                    std::ops::ControlFlow::Break(()) => return std::ops::ControlFlow::Break(()),
-                }
+                collector.emit_value(i).await;
             }
-            std::ops::ControlFlow::Continue(())
         });
 
         let collected = Arc::new(Mutex::new(Vec::new()));
         let collected_clone = Arc::clone(&collected);
 
-        let _ = numbers
+        numbers
             .take(3)
-            .collect(move |x| {
+            .for_each(move |x| {
                 let collected = Arc::clone(&collected_clone);
                 async move {
                     collected.lock().await.push(x);
-                    std::ops::ControlFlow::Continue(())
                 }
             })
             .await;

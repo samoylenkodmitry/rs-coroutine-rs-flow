@@ -1,12 +1,12 @@
-use coroflow::{flow, flow_of, FlowExt};
+use coroflow::{flow_fn, flow_of, FlowExt};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
 #[tokio::test]
 async fn map_and_filter_pipeline_produces_expected_values() {
-    let numbers = flow(|collector| async move {
+    let numbers = flow_fn(|collector| async move {
         for value in 0..5 {
-            collector.emit(value).await;
+            collector.emit_value(value).await;
         }
     });
 
@@ -17,7 +17,7 @@ async fn map_and_filter_pipeline_produces_expected_values() {
         .filter_sync(|value| *value % 2 == 0)
         .map(|value| async move { value * 10 })
         .on_each(|value| assert_eq!(value % 10, 0))
-        .collect(move |value| {
+        .for_each(move |value| {
             let results = Arc::clone(&results_clone);
             async move {
                 results.lock().await.push(value);
@@ -31,9 +31,9 @@ async fn map_and_filter_pipeline_produces_expected_values() {
 
 #[tokio::test]
 async fn drop_and_take_limit_flow_size() {
-    let flow = flow(|collector| async move {
+    let flow = flow_fn(|collector| async move {
         for value in 1..=6 {
-            collector.emit(value).await;
+            collector.emit_value(value).await;
         }
     });
 
@@ -41,7 +41,7 @@ async fn drop_and_take_limit_flow_size() {
     let results_clone = Arc::clone(&results);
     flow.drop_first(2)
         .take(2)
-        .collect(move |value| {
+        .for_each(move |value| {
             let results = Arc::clone(&results_clone);
             async move {
                 results.lock().await.push(value);
@@ -66,7 +66,7 @@ async fn flat_map_latest_switches_to_new_flows() {
         .flat_map_latest(|x| async move {
             flow_of!(x * 10, x * 10 + 1)
         })
-        .collect(move |value| {
+        .for_each(move |value| {
             let results = Arc::clone(&results_clone);
             async move {
                 results.lock().await.push(value);
@@ -98,10 +98,10 @@ async fn flat_map_latest_cancels_previous_flow() {
     use tokio::time::{sleep, Duration};
 
     // Test that flat_map_latest cancels the previous inner flow when a new one arrives
-    let upstream = flow(|collector| async move {
-        collector.emit(1).await;
+    let upstream = flow_fn(|collector| async move {
+        collector.emit_value(1).await;
         sleep(Duration::from_millis(10)).await; // Give first flow time to start
-        collector.emit(2).await;
+        collector.emit_value(2).await;
     });
 
     let first_flow_aborted = Arc::new(AtomicBool::new(false));
@@ -116,15 +116,15 @@ async fn flat_map_latest_cancels_previous_flow() {
             async move {
                 if x == 1 {
                     // First inner flow - should be cancelled when second arrives
-                    flow(move |collector| {
+                    flow_fn(move |collector| {
                         let flag = flag.clone();
                         async move {
-                            collector.emit(100).await;
+                            collector.emit_value(100).await;
                             // Long sleep - should be interrupted by cancellation
                             sleep(Duration::from_millis(100)).await;
                             // This should not execute because flow is aborted
                             flag.store(true, Ordering::SeqCst);
-                            collector.emit(101).await;
+                            collector.emit_value(101).await;
                         }
                     })
                 } else {
@@ -133,7 +133,7 @@ async fn flat_map_latest_cancels_previous_flow() {
                 }
             }
         })
-        .collect(move |value| {
+        .for_each(move |value| {
             let results = Arc::clone(&results_clone);
             async move {
                 results.lock().await.push(value);
