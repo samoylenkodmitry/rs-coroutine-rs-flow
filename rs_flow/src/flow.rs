@@ -51,16 +51,44 @@ impl<T> FlowCollector<T> {
     /// This is the ergonomic alternative to `emit()` that doesn't return
     /// `ControlFlow`. Use this when you don't need to check for early termination.
     ///
-    /// # Example
-    /// ```ignore
-    /// for i in 1..=5 {
-    ///     collector.emit_value(i).await;
-    /// }
-    /// ```
+    /// # ⚠️ WARNING: Ignores Downstream Termination
     ///
-    /// Note: If downstream consumers signal early termination (e.g., via `take()`),
-    /// this will silently ignore it and continue emitting. Use `emit()` if you
-    /// need to respect termination signals.
+    /// This method **silently ignores** early termination signals from downstream
+    /// operators like `take()`, `first()`, etc. This means your producer will
+    /// continue emitting ALL values even if the consumer stopped listening.
+    ///
+    /// **When to use `emit_value()`:**
+    /// - Small, finite data sources (e.g., emitting 5-10 values)
+    /// - When you know downstream will consume everything
+    /// - Simple test cases
+    ///
+    /// **When NOT to use `emit_value()` (use `emit()` instead):**
+    /// - Large or infinite data sources (e.g., emitting 1000+ values)
+    /// - With downstream operators like `.take(5)` or `.first()`
+    /// - When performance matters (avoiding wasted work)
+    ///
+    /// # Example - The Problem
+    /// ```ignore
+    /// // ❌ BAD: Emits all 1000 values even though downstream only wants 5!
+    /// let flow = flow_fn(|collector| async move {
+    ///     for i in 1..=1000 {
+    ///         collector.emit_value(i).await;  // Ignores termination!
+    ///     }
+    /// });
+    /// flow.take(5).for_each(|x| async move { println!("{}", x) }).await;
+    ///
+    /// // ✅ GOOD: Stops emitting after 5 values
+    /// let flow = flow(|collector| async move {
+    ///     for i in 1..=1000 {
+    ///         match collector.emit(i).await {
+    ///             Continue(()) => {},
+    ///             Break(()) => break,  // Downstream signaled termination!
+    ///         }
+    ///     }
+    ///     Continue(())
+    /// });
+    /// flow.take(5).for_each(|x| async move { println!("{}", x) }).await;
+    /// ```
     pub async fn emit_value(&self, value: T) {
         let _ = self.emit(value).await;
     }

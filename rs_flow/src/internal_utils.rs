@@ -60,6 +60,18 @@ where
             // No scope available - create detached task (lenient fallback)
             // This allows Flows to work in simpler contexts without requiring
             // full CoroutineScope setup, similar to Kotlin's Flow
+
+            // WARN in debug builds - helps catch unintended detached spawns
+            #[cfg(debug_assertions)]
+            {
+                eprintln!(
+                    "⚠️  spawn_in_scope: No CoroutineScope found, using detached task fallback.\n\
+                     → This task will NOT be part of structured concurrency hierarchy.\n\
+                     → For production code, wrap Flow operations in `scope.launch()` or `coroutine_scope!`.\n\
+                     → This warning only appears in debug builds."
+                );
+            }
+
             let cancel_token = CancelToken::new();
             let cancel_clone = cancel_token.clone();
             let job = JobHandle::new();
