@@ -2,7 +2,6 @@
 ///
 /// This module contains helpers used by Flow operators to integrate with
 /// structured concurrency properly.
-
 use rs_coroutine_core::{CancelToken, JobHandle};
 use std::future::Future;
 

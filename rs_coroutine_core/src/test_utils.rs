@@ -382,6 +382,12 @@ impl TimeControlGuard {
     }
 }
 
+impl Default for TimeControlGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Drop for TimeControlGuard {
     fn drop(&mut self) {
         resume();

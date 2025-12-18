@@ -96,17 +96,17 @@ where
                     Ok(_) => self.job.complete_with(Ok(())),
                     Err(e) => self.job.complete_with(Err(e.clone())),
                 }
-                return std::task::Poll::Ready(result);
+                std::task::Poll::Ready(result)
             }
             std::task::Poll::Ready(Err(_)) => {
                 // Sender dropped without sending (shouldn't happen but handle gracefully)
                 self.job.complete_with(Err(TaskError::Aborted));
-                return std::task::Poll::Ready(Err(TaskError::Aborted));
+                std::task::Poll::Ready(Err(TaskError::Aborted))
             }
             std::task::Poll::Pending => {
                 // Result not ready yet - keep polling
                 // This is OK even if join handle completed - the send might be in flight
-                return std::task::Poll::Pending;
+                std::task::Poll::Pending
             }
         }
     }
