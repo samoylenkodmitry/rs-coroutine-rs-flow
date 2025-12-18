@@ -63,9 +63,11 @@ impl Default for CancelToken {
 
 /// A handle to a job that tracks completion and outcome
 ///
-/// JobHandle does NOT handle cancellation directly. Cancellation is managed
-/// via CancelToken in the CoroutineScope. This separation makes the cancellation
-/// hierarchy clear and prevents dual-token confusion.
+/// CRITICAL CHANGE: JobHandle now OWNS its cancellation token.
+/// This restores the hierarchical structure required for Structured Concurrency:
+/// - Each job has its own child token
+/// - Cancelling a job cancels only that job and its children
+/// - Parent cancellation still propagates down via token hierarchy
 ///
 /// ## Implementation Notes
 ///
@@ -78,19 +80,41 @@ impl Default for CancelToken {
 /// - Safe because critical section is tiny (just a comparison + store)
 #[derive(Clone)]
 pub struct JobHandle {
+    /// CRITICAL: Job owns its cancellation token
+    /// This allows individual job cancellation and proper hierarchical structure
+    cancel_token: CancelToken,
     completed: Arc<Notify>,
     outcome: Arc<StdMutex<Option<Result<(), TaskError>>>>,
     is_completed: Arc<AtomicBool>,
 }
 
 impl JobHandle {
-    /// Create a new JobHandle
-    pub fn new() -> Self {
+    /// Create a new JobHandle with a cancellation token
+    ///
+    /// CRITICAL: Caller must provide a child token from the parent scope
+    /// to maintain the cancellation hierarchy.
+    pub fn new(cancel_token: CancelToken) -> Self {
         Self {
+            cancel_token,
             completed: Arc::new(Notify::new()),
             outcome: Arc::new(StdMutex::new(None)),
             is_completed: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Cancel this specific job
+    ///
+    /// This cancels only this job and its children (via token hierarchy).
+    /// Parent jobs are NOT affected.
+    pub fn cancel(&self) {
+        self.cancel_token.cancel();
+    }
+
+    /// Get the cancellation token for this job
+    ///
+    /// Useful for creating child tasks that should be cancelled when this job is cancelled.
+    pub fn cancel_token(&self) -> &CancelToken {
+        &self.cancel_token
     }
 
     /// Wait for this job to complete (backwards compatible - discards outcome)
@@ -138,11 +162,19 @@ impl JobHandle {
     }
 
     /// Mark this job as completed with success
-    pub fn complete(&self) {
+    ///
+    /// CRITICAL: Restricted to pub(crate) to prevent external code from spoofing completion.
+    /// Only the library internals (observer tasks) should determine job outcome.
+    #[allow(dead_code)]
+    pub(crate) fn complete(&self) {
         self.complete_with(Ok(()));
     }
 
     /// Mark this job as completed with an outcome
+    ///
+    /// CRITICAL: Restricted to pub(crate) to prevent completion races.
+    /// If this were `pub`, user code could call it and race with the observer's
+    /// legitimate completion (e.g., user sets "Success" right before observer sets "Panic").
     ///
     /// ## Outcome Upgrade Policy
     ///
@@ -162,7 +194,7 @@ impl JobHandle {
     ///
     /// Uses `std::sync::Mutex` (blocking) instead of `try_lock` to guarantee
     /// outcome is NEVER silently lost due to lock contention.
-    pub fn complete_with(&self, result: Result<(), TaskError>) {
+    pub(crate) fn complete_with(&self, result: Result<(), TaskError>) {
         // CRITICAL: Use blocking lock, not try_lock
         // If this blocks, it's only for microseconds (tiny critical section)
         let mut outcome = self.outcome.lock().expect("JobHandle outcome mutex poisoned");
@@ -206,7 +238,7 @@ impl JobHandle {
 
 impl Default for JobHandle {
     fn default() -> Self {
-        Self::new()
+        Self::new(CancelToken::new())
     }
 }
 

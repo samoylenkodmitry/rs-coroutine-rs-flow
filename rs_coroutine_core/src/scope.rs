@@ -123,10 +123,12 @@ pub struct CoroutineScope {
 impl CoroutineScope {
     /// Create a new CoroutineScope
     pub fn new(dispatcher: Dispatcher) -> Self {
+        // CRITICAL FIX: Create token first, then pass to JobHandle
+        let cancel_token = CancelToken::new();
         Self {
             dispatcher,
-            job: JobHandle::new(),
-            cancel_token: CancelToken::new(),
+            job: JobHandle::new(cancel_token.clone()),
+            cancel_token,
         }
     }
 
@@ -136,23 +138,33 @@ impl CoroutineScope {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        let scope = Arc::new(self.clone());
-        let dispatcher = self.dispatcher.clone();
-        let job = JobHandle::new();  // New job for launched coroutine
-        let cancel_token = self.cancel_token.clone();
+        // CRITICAL FIX: Create a CHILD token for this specific job
+        // This restores hierarchical cancellation - each job can be cancelled independently
+        let child_token = self.cancel_token.child();
+
+        // JobHandle owns this specific child token
+        let job = JobHandle::new(child_token.clone());
+
+        // Create a new child scope for the task to run in
+        // This ensures children-of-children attach to THIS job, not the root
+        let child_scope = Arc::new(CoroutineScope {
+            dispatcher: self.dispatcher.clone(),
+            job: job.clone(),
+            cancel_token: child_token.clone(),
+        });
 
         let job_for_observer = job.clone();
-        let cancel_token_for_task = cancel_token.clone();
+        let cancel_token_for_task = child_token.clone(); // Use child token!
 
         // Channel to communicate which select branch won
         let (outcome_tx, outcome_rx) = oneshot::channel();
 
-        let join_handle = dispatcher.spawn(async move {
+        let join_handle = child_scope.dispatcher.clone().spawn(async move {
             // NO GUARD - Observer is single source of truth for outcome
             // This prevents the race where guard stores Ok() before observer detects panic
 
             let result = CURRENT_SCOPE
-                .scope(scope.clone(), async move {
+                .scope(child_scope.clone(), async move {
                     // CRITICAL: Check cancellation BEFORE starting work
                     // This prevents "already cancelled but ran anyway" races
                     if cancel_token_for_task.is_cancelled() {
@@ -237,13 +249,17 @@ impl CoroutineScope {
         T: Send + 'static,
     {
         let (tx, rx) = oneshot::channel();
+
+        // CRITICAL FIX: Create child token for this job
+        let child_token = self.cancel_token.child();
+        let job = JobHandle::new(child_token.clone());
+
         let child_scope = Arc::new(CoroutineScope {
             dispatcher: dispatcher.clone(),
-            job: JobHandle::new(),  // New job for child scope
-            cancel_token: self.cancel_token.child(),  // Child of parent's cancellation token
+            job: job.clone(),
+            cancel_token: child_token.clone(),
         });
         let cancel_token = child_scope.cancel_token.clone();
-        let job = child_scope.job.clone();
         let job_for_future = job.clone();
         let child_cancel_token_for_guard = child_scope.cancel_token.clone();
 
@@ -291,13 +307,17 @@ impl CoroutineScope {
         T: Send + 'static,
     {
         let (tx, rx) = oneshot::channel();
+
+        // CRITICAL FIX: Create child token for this job
+        let child_token = self.cancel_token.child();
+        let job = JobHandle::new(child_token.clone());
+
         let child_scope = Arc::new(CoroutineScope {
             dispatcher: dispatcher.clone(),
-            job: JobHandle::new(),  // New job for child scope
-            cancel_token: self.cancel_token.child(),  // Child of parent's cancellation token
+            job: job.clone(),
+            cancel_token: child_token.clone(),
         });
         let cancel_token = child_scope.cancel_token.clone();
-        let job = child_scope.job.clone();
         let job_for_observer = job.clone();
 
         // Separate channel to communicate outcome to observer
