@@ -289,6 +289,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_sync_operators() {
+        use crate::{CoroutineScope, Dispatcher};
+
         let numbers: Flow<i32> = flow! {
             for i in 1..=10 {
                 let _ = emit!(i);
@@ -298,17 +300,24 @@ mod tests {
         let collected = Arc::new(Mutex::new(Vec::new()));
         let collected_clone = Arc::clone(&collected);
 
-        let _ = numbers
-            .map_sync(|x| x * 2)
-            .filter_sync(|x| *x > 5)
-            .take(3)
-            .collect(move |x| {
-                let collected = Arc::clone(&collected_clone);
-                async move {
-                    collected.lock().await.push(x);
-                    std::ops::ControlFlow::Continue(())
-                }
+        // Wrap in scope for structured concurrency
+        let scope = CoroutineScope::new(Dispatcher::default());
+        scope
+            .launch(async move {
+                let _ = numbers
+                    .map_sync(|x| x * 2)
+                    .filter_sync(|x| *x > 5)
+                    .take(3)
+                    .collect(move |x| {
+                        let collected = Arc::clone(&collected_clone);
+                        async move {
+                            collected.lock().await.push(x);
+                            std::ops::ControlFlow::Continue(())
+                        }
+                    })
+                    .await;
             })
+            .join()
             .await;
 
         let result = collected.lock().await;
@@ -317,6 +326,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_take_operator() {
+        use crate::{CoroutineScope, Dispatcher};
+
         let numbers: Flow<i32> = flow_fn(|collector| async move {
             for i in 1..=10 {
                 collector.emit_value(i).await;
@@ -326,15 +337,19 @@ mod tests {
         let collected = Arc::new(Mutex::new(Vec::new()));
         let collected_clone = Arc::clone(&collected);
 
-        numbers
-            .take(3)
-            .for_each(move |x| {
-                let collected = Arc::clone(&collected_clone);
-                async move {
-                    collected.lock().await.push(x);
-                }
-            })
-            .await;
+        // Wrap in scope for structured concurrency
+        let scope = CoroutineScope::new(Dispatcher::default());
+        scope.launch(async move {
+            numbers
+                .take(3)
+                .for_each(move |x| {
+                    let collected = Arc::clone(&collected_clone);
+                    async move {
+                        collected.lock().await.push(x);
+                    }
+                })
+                .await;
+        }).join().await;
 
         let result = collected.lock().await;
         assert_eq!(*result, vec![1, 2, 3]);

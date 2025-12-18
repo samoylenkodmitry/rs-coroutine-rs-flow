@@ -213,7 +213,7 @@ where
 /// - If not in a scope: task will be aborted (fallback for backward compatibility)
 pub struct FlowStream<T> {
     rx: mpsc::Receiver<T>,
-    _task: FlowStreamGuard,
+    task: FlowStreamGuard,
 }
 
 /// Guard for FlowStream background task
@@ -222,10 +222,25 @@ pub struct FlowStream<T> {
 /// Essential for flat_map_latest which switches flows - without cancel, old flows keep running.
 struct FlowStreamGuard(Option<crate::internal_utils::ScopeAwareHandle>);
 
+impl FlowStreamGuard {
+    /// Cancel and wait for the background task to complete
+    ///
+    /// CRITICAL: This is required for flat_map_latest to avoid concurrent stream execution.
+    /// Without await, dropping old stream and starting new stream creates a race.
+    async fn cancel_and_join(mut self) {
+        if let Some(handle) = self.0.take() {
+            handle.cancel_and_join().await;
+        }
+    }
+}
+
 impl Drop for FlowStreamGuard {
     fn drop(&mut self) {
         // CRITICAL: Must cancel the collection task when stream is dropped
         // Without this, flat_map_latest leaks 999 tasks for 1000 items
+        //
+        // NOTE: We can only signal cancellation here, not await completion (async drop doesn't exist).
+        // For proper awaited cancellation, use FlowStream::cancel_and_join() explicitly.
         if let Some(handle) = self.0.take() {
             handle.cancel();
         }
@@ -273,8 +288,21 @@ where
 
         Self {
             rx,
-            _task: FlowStreamGuard(Some(task)),
+            task: FlowStreamGuard(Some(task)),
         }
+    }
+
+    /// Cancel the background collection task and wait for it to complete
+    ///
+    /// CRITICAL: Required for flat_map_latest to properly switch streams without race conditions.
+    /// Regular drop only signals cancellation but doesn't wait - this ensures complete cleanup.
+    ///
+    /// After calling this, the stream is effectively dead (task is gone).
+    pub async fn cancel_and_join(mut self) {
+        // Take ownership of the guard and await its completion
+        let guard = std::mem::replace(&mut self.task, FlowStreamGuard(None));
+        guard.cancel_and_join().await;
+        // self (including rx) drops here
     }
 }
 

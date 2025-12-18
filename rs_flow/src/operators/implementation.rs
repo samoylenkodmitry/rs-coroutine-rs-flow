@@ -273,7 +273,13 @@ where
                         new_flow_opt = rx.recv() => {
                             match new_flow_opt {
                                 Some(new_flow) => {
-                                    // Drop old stream (cooperative cancellation via scope if available)
+                                    // CRITICAL: Must await old stream cancellation before starting new one
+                                    // Without this, old and new streams run concurrently (data race)
+                                    if let Some(old_stream) = current_stream.take() {
+                                        old_stream.cancel_and_join().await;
+                                    }
+
+                                    // Now safe to start new stream - old one is fully stopped
                                     current_stream = Some(new_flow.to_stream(DEFAULT_STREAM_BUFFER_SIZE));
                                 }
                                 None => {

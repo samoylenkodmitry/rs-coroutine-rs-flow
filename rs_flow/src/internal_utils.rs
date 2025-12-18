@@ -112,6 +112,16 @@ impl ScopeAwareHandle {
         self.cancel_token.cancel();
     }
 
+    /// Cancel the task and wait for it to complete
+    ///
+    /// CRITICAL: Required for flat_map_latest to properly switch streams.
+    /// This ensures the old stream is fully stopped before starting a new one,
+    /// preventing concurrent stream execution which could cause data races.
+    pub async fn cancel_and_join(self) {
+        self.cancel_token.cancel();
+        self.job.join().await;
+    }
+
     /// Convert to a cancel-on-drop guard (default, safe behavior)
     pub fn into_cancel_on_drop(self) -> CancelOnDrop {
         CancelOnDrop(Some(self))

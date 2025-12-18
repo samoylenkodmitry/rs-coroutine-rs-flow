@@ -435,6 +435,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_zip() {
+        use crate::{CoroutineScope, Dispatcher};
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
         let flow1 = flow(|c| async move {
             let _ = c.emit(1).await;
             let _ = c.emit(2).await;
@@ -448,9 +452,21 @@ mod tests {
         });
 
         let zipped = flow1.zip(flow2, |a, b| format!("{}{}", a, b));
-        let result = zipped.to_vec().await;
 
-        assert_eq!(result, vec!["1a", "2b", "3c"]);
+        // Wrap in scope for structured concurrency
+        let scope = CoroutineScope::new(Dispatcher::default());
+        let result = Arc::new(Mutex::new(Vec::new()));
+        let result_clone = Arc::clone(&result);
+        scope
+            .launch(async move {
+                let vec = zipped.to_vec().await;
+                *result_clone.lock().await = vec;
+            })
+            .join()
+            .await;
+        let result = result.lock().await;
+
+        assert_eq!(*result, vec!["1a", "2b", "3c"]);
     }
 
     #[tokio::test]
@@ -485,6 +501,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_merge() {
+        use crate::{CoroutineScope, Dispatcher};
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
         let flow1 = flow(|c| async move {
             let _ = c.emit(1).await;
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -499,7 +519,19 @@ mod tests {
         });
 
         let merged = merge(vec![flow1, flow2]);
-        let result = merged.to_vec().await;
+
+        // Wrap in scope for structured concurrency
+        let scope = CoroutineScope::new(Dispatcher::default());
+        let result = Arc::new(Mutex::new(Vec::new()));
+        let result_clone = Arc::clone(&result);
+        scope
+            .launch(async move {
+                let vec = merged.to_vec().await;
+                *result_clone.lock().await = vec;
+            })
+            .join()
+            .await;
+        let result = result.lock().await;
 
         // Values arrive in time order (roughly)
         assert_eq!(result.len(), 4);
