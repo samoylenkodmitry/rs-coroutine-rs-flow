@@ -107,7 +107,10 @@ impl ScopeAwareHandle {
     }
 
     /// Cancel the task immediately (cooperative cancellation)
-    pub fn cancel(self) {
+    ///
+    /// CRITICAL FIX: Takes &self instead of self to allow cancelling without moving.
+    /// This enables patterns like: handle.cancel(); handle.join().await;
+    pub fn cancel(&self) {
         self.cancel_token.cancel();
     }
 
@@ -139,8 +142,48 @@ impl ScopeAwareHandle {
 
 /// A cancel-on-drop guard (DEFAULT, SAFE)
 ///
-/// When dropped, this cancels the task immediately by calling job.cancel()
-/// (cooperative cancellation). This is the safe default that prevents task leaks.
+/// # Drop Behavior
+///
+/// When dropped, this cancels the task immediately by calling `cancel()`.
+///
+/// **IMPORTANT LIMITATION**: Drop is synchronous, so it cannot `await` task completion.
+/// This means:
+/// - `cancel()` signals the task to stop (cooperative cancellation)
+/// - Drop returns **before the task actually stops**
+/// - The task may still be running after drop
+///
+/// This is a **fundamental Rust limitation** - Drop cannot be async.
+///
+/// ## Implications
+///
+/// For true structured concurrency where tasks MUST be fully stopped before
+/// continuing, you **MUST** use explicit cleanup:
+///
+/// ```ignore
+/// // ❌ BAD: Task may still be running after this block
+/// {
+///     let _guard = spawn_in_scope(task).into_cancel_on_drop();
+/// }  // Drop cancels but doesn't wait!
+///
+/// // ✅ GOOD: Explicit cleanup guarantees task is stopped
+/// let handle = spawn_in_scope(task);
+/// handle.cancel_and_join().await;  // Cancels AND waits
+/// ```
+///
+/// ## When CancelOnDrop Is Sufficient
+///
+/// CancelOnDrop is safe when:
+/// - The task checks cancellation frequently and exits quickly
+/// - The parent scope will wait for all tasks anyway
+/// - You're okay with tasks finishing "eventually" vs "immediately"
+///
+/// ## When You MUST Use cancel_and_join()
+///
+/// Use explicit cleanup when:
+/// - Switching flows in flat_map_latest (prevents concurrent execution)
+/// - Releasing exclusive resources (files, locks, network connections)
+/// - Ensuring deterministic shutdown order
+/// - Testing (to avoid background tasks affecting other tests)
 pub struct CancelOnDrop(Option<ScopeAwareHandle>);
 
 impl CancelOnDrop {

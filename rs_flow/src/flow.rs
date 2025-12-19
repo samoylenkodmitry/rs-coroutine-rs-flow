@@ -218,8 +218,37 @@ pub struct FlowStream<T> {
 
 /// Guard for FlowStream background task
 ///
-/// CRITICAL: This MUST cancel the collection task when stream is dropped.
+/// # Drop Behavior & Limitations
+///
+/// **CRITICAL**: This cancels the background collection task when the stream is dropped.
 /// Essential for flat_map_latest which switches flows - without cancel, old flows keep running.
+///
+/// **IMPORTANT LIMITATION**: Like CancelOnDrop, this has async drop limitations:
+/// - Drop calls `cancel()` to signal task to stop
+/// - Drop returns **before task actually stops**
+/// - Task may still be running after drop
+///
+/// This is a fundamental Rust limitation (Drop cannot be async).
+///
+/// ## For Deterministic Cleanup
+///
+/// If you need to ensure the background task is fully stopped before continuing,
+/// use `FlowStream::cancel_and_join()`:
+///
+/// ```ignore
+/// // ❌ Drop doesn't wait - old and new tasks may overlap!
+/// let mut stream = flow.to_stream(10);
+/// drop(stream);
+/// let new_stream = flow.to_stream(10);  // May run concurrently with old!
+///
+/// // ✅ Explicit cleanup - guaranteed no overlap
+/// let stream = flow.to_stream(10);
+/// stream.cancel_and_join().await;  // Wait for full stop
+/// let new_stream = flow.to_stream(10);  // Safe, old is stopped
+/// ```
+///
+/// **Note**: flat_map_latest uses cancel_and_join() internally to prevent
+/// concurrent stream execution.
 struct FlowStreamGuard(Option<crate::internal_utils::ScopeAwareHandle>);
 
 impl FlowStreamGuard {

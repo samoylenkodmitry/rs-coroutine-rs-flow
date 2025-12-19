@@ -113,9 +113,30 @@ where
 }
 
 /// A coroutine scope manages the lifecycle of coroutines
+///
+/// # Architecture Note: The `job` Field
+///
+/// The `job` field is currently **not actively used** for scope-level lifecycle tracking.
+/// Child task management happens via the `cancel_token` hierarchy, not the job.
+///
+/// **Current State**: Each scope carries a JobHandle, but it's never completed or joined.
+/// Child scopes clone it, but don't interact with it.
+///
+/// **Potential Future Use**:
+/// - Track all child jobs for bulk waiting (scope.join_all())
+/// - Complete the scope's job when scope is cancelled
+/// - Provide scope-level outcome tracking
+///
+/// **Why Not Remove It**:
+/// - Removing it is a breaking API change
+/// - May want it for future scope lifecycle features
+/// - Maintains symmetry with Kotlin's CoroutineScope design
+///
+/// For now, this field is **vestigial but reserved for future enhancements**.
 #[derive(Clone)]
 pub struct CoroutineScope {
     pub dispatcher: Dispatcher,
+    /// Currently unused - reserved for future scope lifecycle tracking
     pub job: JobHandle,
     pub cancel_token: CancelToken,
 }
@@ -195,7 +216,18 @@ impl CoroutineScope {
         // Spawn observer task - SINGLE SOURCE OF TRUTH for job outcome
         // CRITICAL: This is the ONLY place that completes the job
         // Prevents panic masking race where guard completes as Ok before observer detects panic
-        tokio::spawn(async move {
+        //
+        // CRITICAL FIX: Use self.dispatcher.spawn() instead of tokio::spawn()
+        // This keeps the observer within the dispatcher's execution context rather than
+        // completely detached. While observers still can't be individually cancelled,
+        // this is better than tokio::spawn which is entirely unstructured.
+        //
+        // NOTE: Observers are inherently tricky for structured concurrency because:
+        // - launch() returns immediately (fire-and-forget)
+        // - Observer must await JoinHandle to detect panics
+        // - Observer completes JobHandle asynchronously
+        // A future improvement would track observers and abort them on scope cancellation.
+        self.dispatcher.clone().spawn(async move {
             match join_handle.await {
                 Ok(()) => {
                     // Task completed - get the actual outcome from the oneshot
@@ -350,7 +382,12 @@ impl CoroutineScope {
         });
 
         // Spawn observer to complete the job and detect panics
-        tokio::spawn(async move {
+        //
+        // CRITICAL FIX: Use dispatcher.spawn() instead of tokio::spawn()
+        // This keeps the observer within the dispatcher's execution context.
+        // While not perfect (observers still can't be individually cancelled),
+        // this is better than completely detached tokio::spawn().
+        dispatcher.spawn(async move {
             match join_handle.await {
                 Ok(()) => {
                     // Task completed - get actual outcome from select site
@@ -376,8 +413,11 @@ impl CoroutineScope {
         });
 
         Deferred {
-            rx,
-            job,
+            inner: Arc::new(DeferredInner {
+                rx: tokio::sync::Mutex::new(Some(rx)),
+                cached_result: tokio::sync::Mutex::new(None),
+                job,
+            }),
             parent_cancel_token: self.cancel_token.clone(),
         }
     }
@@ -397,14 +437,35 @@ impl CoroutineScope {
 }
 
 /// A deferred value that can be awaited
+///
+/// CRITICAL FIX: Now cloneable and multi-await-able (like Kotlin's Deferred).
+/// The first await polls the oneshot receiver and caches the result.
+/// Subsequent awaits return the cached result.
+///
+/// This allows patterns like:
+/// ```ignore
+/// let deferred = scope.async_task(dispatcher, async { 42 });
+/// let result1 = deferred.clone().await_result().await;
+/// let result2 = deferred.await_result().await;  // Returns same cached result
+/// ```
+#[derive(Clone)]
 pub struct Deferred<T> {
-    rx: oneshot::Receiver<Result<T, TaskError>>,
-    job: JobHandle,
+    // Shared state for caching the result
+    inner: Arc<DeferredInner<T>>,
     parent_cancel_token: CancelToken,
 }
 
-impl<T> Deferred<T> {
+struct DeferredInner<T> {
+    rx: tokio::sync::Mutex<Option<oneshot::Receiver<Result<T, TaskError>>>>,
+    cached_result: tokio::sync::Mutex<Option<Result<T, TaskError>>>,
+    job: JobHandle,
+}
+
+impl<T: Clone> Deferred<T> {
     /// Await the deferred value
+    ///
+    /// CRITICAL FIX: Now supports multiple awaits. The first await polls the channel
+    /// and caches the result. Subsequent awaits return the cached result.
     ///
     /// This races the child task against parent cancellation. If the result is already
     /// computed when you call this method, it will be returned even if the parent was
@@ -418,37 +479,70 @@ impl<T> Deferred<T> {
     ///
     /// Note: If the child task itself was cancelled (not the parent), this returns
     /// `Err(TaskError::Cancelled)` from the child.
-    pub async fn await_result(mut self) -> Result<T, TaskError> {
-        // CRITICAL: Check if result is already available BEFORE racing with parent cancellation
-        // This prevents "await timing changes outcome" behavior where a completed result
-        // gets thrown away just because parent was cancelled between completion and await.
-        match self.rx.try_recv() {
-            Ok(result) => {
-                // Result is already available - return it immediately
-                // Parent cancellation doesn't matter; the work is already done
-                return result;
-            }
-            Err(_) => {
-                // Result not ready yet - fall through to race against parent cancellation
+    pub async fn await_result(&self) -> Result<T, TaskError> {
+        // Check if result is already cached
+        {
+            let cached = self.inner.cached_result.lock().await;
+            if let Some(result) = cached.as_ref() {
+                return result.clone();
             }
         }
 
-        // Result not available yet - race between parent cancellation and task completion
-        tokio::select! {
-            biased;
-            _ = self.parent_cancel_token.cancelled() => {
-                // Parent cancelled while waiting - return Cancelled
-                // Note: This doesn't corrupt the job outcome; the job was completed by the observer
-                Err(TaskError::Cancelled)
+        // Result not cached - need to await the receiver
+        // Take the receiver (only first awaiter gets it)
+        let mut rx_opt = self.inner.rx.lock().await;
+        let mut rx = match rx_opt.take() {
+            Some(receiver) => receiver,
+            None => {
+                // Receiver was already taken by another awaiter
+                // Wait for them to cache the result
+                drop(rx_opt);
+                loop {
+                    tokio::task::yield_now().await;
+                    let cached = self.inner.cached_result.lock().await;
+                    if let Some(result) = cached.as_ref() {
+                        return result.clone();
+                    }
+                }
             }
-            result = self.rx => {
-                // Result arrived - return it
-                result.unwrap_or(Err(TaskError::Aborted))
+        };
+        drop(rx_opt);
+
+        // We have the receiver - poll it
+        // CRITICAL: Check if result is already available BEFORE racing with parent cancellation
+        let result = match rx.try_recv() {
+            Ok(result) => {
+                // Result is already available - return it immediately
+                result
             }
+            Err(_) => {
+                // Result not ready yet - race against parent cancellation
+                tokio::select! {
+                    biased;
+                    _ = self.parent_cancel_token.cancelled() => {
+                        // Parent cancelled while waiting - return Cancelled
+                        Err(TaskError::Cancelled)
+                    }
+                    result = rx => {
+                        // Result arrived
+                        result.unwrap_or(Err(TaskError::Aborted))
+                    }
+                }
+            }
+        };
+
+        // Cache the result for future awaits
+        {
+            let mut cached = self.inner.cached_result.lock().await;
+            *cached = Some(result.clone());
         }
+
+        result
     }
 
     /// Await the deferred value without being interrupted by parent cancellation
+    ///
+    /// CRITICAL FIX: Now supports multiple awaits via cached result.
     ///
     /// This method does NOT race against parent cancellation. It will wait for the
     /// child task to complete (or be cancelled by its own scope) and return the result.
@@ -463,19 +557,47 @@ impl<T> Deferred<T> {
     /// - `TaskError::Aborted` if the task is dropped before completion
     ///
     /// Note: This will NOT return `TaskError::Cancelled` due to parent cancellation.
-    pub async fn await_uninterruptible(self) -> Result<T, TaskError> {
-        // Do NOT race against parent cancellation - just wait for task completion
-        // The observer handles the join_handle and completes the job
-        self.job.join().await;
+    pub async fn await_uninterruptible(&self) -> Result<T, TaskError> {
+        // Check if result is already cached
+        {
+            let cached = self.inner.cached_result.lock().await;
+            if let Some(result) = cached.as_ref() {
+                return result.clone();
+            }
+        }
 
-        // Job completed - get result from oneshot
-        // RecvError only occurs if sender dropped without sending (runtime abort/shutdown)
-        self.rx.await.unwrap_or(Err(TaskError::Aborted))
+        // Wait for job to complete
+        self.inner.job.join().await;
+
+        // Try to get result from receiver
+        let mut rx_opt = self.inner.rx.lock().await;
+        let result = if let Some(rx) = rx_opt.take() {
+            drop(rx_opt);
+            rx.await.unwrap_or(Err(TaskError::Aborted))
+        } else {
+            // Receiver already taken - wait for cached result
+            drop(rx_opt);
+            loop {
+                tokio::task::yield_now().await;
+                let cached = self.inner.cached_result.lock().await;
+                if let Some(result) = cached.as_ref() {
+                    return result.clone();
+                }
+            }
+        };
+
+        // Cache the result
+        {
+            let mut cached = self.inner.cached_result.lock().await;
+            *cached = Some(result.clone());
+        }
+
+        result
     }
 
     /// Get the job handle
     pub fn job(&self) -> &JobHandle {
-        &self.job
+        &self.inner.job
     }
 }
 
