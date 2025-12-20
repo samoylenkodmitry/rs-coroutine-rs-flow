@@ -140,8 +140,6 @@ pub struct CoroutineScope {
     /// Currently unused - reserved for future scope lifecycle tracking
     pub job: JobHandle,
     pub cancel_token: CancelToken,
-    /// Track observer tasks so they can be cancelled when scope is cancelled
-    observers: Arc<std::sync::Mutex<Vec<tokio::task::AbortHandle>>>,
 }
 
 impl CoroutineScope {
@@ -153,7 +151,6 @@ impl CoroutineScope {
             dispatcher,
             job: JobHandle::new(cancel_token.clone()),
             cancel_token,
-            observers: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -176,7 +173,6 @@ impl CoroutineScope {
             dispatcher: self.dispatcher.clone(),
             job: job.clone(),
             cancel_token: child_token.clone(),
-            observers: Arc::new(std::sync::Mutex::new(Vec::new())),
         });
 
         let job_for_observer = job.clone();
@@ -232,8 +228,8 @@ impl CoroutineScope {
         // - Observer must await JoinHandle to detect panics
         // - Observer completes JobHandle asynchronously
         //
-        // CRITICAL FIX: Now tracking observers so they can be aborted on scope.cancel()
-        let observer_handle = self.dispatcher.clone().spawn(async move {
+        // Spawn observer task - not tracked, allowed to complete naturally
+        self.dispatcher.clone().spawn(async move {
             match join_handle.await {
                 Ok(()) => {
                     // Task completed - get the actual outcome from the oneshot
@@ -259,11 +255,6 @@ impl CoroutineScope {
                 }
             }
         });
-
-        // Track observer for cancellation
-        if let Ok(mut observers) = self.observers.lock() {
-            observers.push(observer_handle.abort_handle());
-        }
 
         job
     }
@@ -301,7 +292,6 @@ impl CoroutineScope {
             dispatcher: dispatcher.clone(),
             job: job.clone(),
             cancel_token: child_token.clone(),
-            observers: Arc::new(std::sync::Mutex::new(Vec::new())),
         });
         let cancel_token = child_scope.cancel_token.clone();
         let job_for_future = job.clone();
@@ -362,7 +352,6 @@ impl CoroutineScope {
             dispatcher: dispatcher.clone(),
             job: job.clone(),
             cancel_token: child_token.clone(),
-            observers: Arc::new(std::sync::Mutex::new(Vec::new())),
         });
         let cancel_token = child_scope.cancel_token.clone();
         let job_for_observer = job.clone();
@@ -402,8 +391,8 @@ impl CoroutineScope {
         //
         // CRITICAL FIX: Use dispatcher.spawn() instead of tokio::spawn()
         // This keeps the observer within the dispatcher's execution context.
-        // Now also tracking observers so they can be aborted on scope.cancel()
-        let observer_handle = dispatcher.spawn(async move {
+        // Spawn observer task - not tracked, allowed to complete naturally
+        dispatcher.spawn(async move {
             match join_handle.await {
                 Ok(()) => {
                     // Task completed - get actual outcome from select site
@@ -428,11 +417,6 @@ impl CoroutineScope {
             }
         });
 
-        // Track observer for cancellation
-        if let Ok(mut observers) = self.observers.lock() {
-            observers.push(observer_handle.abort_handle());
-        }
-
         Deferred {
             inner: Arc::new(DeferredInner {
                 rx: tokio::sync::Mutex::new(Some(rx)),
@@ -449,16 +433,10 @@ impl CoroutineScope {
     /// Cancellation is propagated via the CancelToken hierarchy.
     /// All tasks waiting on this scope's token (or child tokens) will observe cancellation.
     ///
-    /// CRITICAL FIX: Now also aborts all observer tasks to prevent them from outliving scope.
+    /// NOTE: Observer tasks are NOT aborted here. They must complete naturally to mark
+    /// jobs as complete. Aborting them would cause job.join() to hang forever.
     pub fn cancel(&self) {
         self.cancel_token.cancel();
-
-        // Abort all observer tasks
-        if let Ok(mut observers) = self.observers.lock() {
-            for handle in observers.drain(..) {
-                handle.abort();
-            }
-        }
     }
 
     /// Check if this scope is cancelled
