@@ -4,6 +4,7 @@
 //! and provides a familiar experience for Kotlin developers.
 
 use coroflow::{flow, flow_fn, shared_flow, state_flow, Flow, FlowExt};
+use std::ops::ControlFlow::Continue;
 use std::time::Duration;
 use tokio::time::sleep;
 
@@ -24,14 +25,15 @@ async fn example_flow_macro() {
     let numbers: Flow<i32> = flow! {
         for i in 1..=5 {
             println!("  Emitting {}", i);
-            emit!(i);
+            let _ = emit!(i);
         }
     };
 
     // Collect with simple println
-    numbers
-        .for_each(|x| async move {
+    let _ = numbers
+        .collect(|x| async move {
             println!("  Received: {}", x);
+            Continue(())
         })
         .await;
 
@@ -53,18 +55,19 @@ async fn example_sync_operators() {
 
     let numbers: Flow<i32> = flow! {
         for i in 1..=10 {
-            emit!(i);
+            let _ = emit!(i);
         }
     };
 
     // Kotlin-like: .map { it * 2 }.filter { it > 5 }
     // Instead of: .map(|x| async move { x * 2 }).filter(|x| { let x = *x; async move { x > 5 } })
-    numbers
+    let _ = numbers
         .map_sync(|x| x * 2)
         .filter_sync(|x| *x > 5)
         .take(3)
-        .for_each(|x| async move {
+        .collect(|x| async move {
             println!("  Got: {}", x);
+            Continue(())
         })
         .await;
 
@@ -85,15 +88,16 @@ async fn example_on_each() {
 
     let numbers: Flow<i32> = flow! {
         for i in 1..=3 {
-            emit!(i);
+            let _ = emit!(i);
         }
     };
 
-    numbers
+    let _ = numbers
         .on_each(|x| println!("  Processing: {}", x))
         .map_sync(|x| x * 2)
-        .for_each(|x| async move {
+        .collect(|x| async move {
             println!("  Result: {}", x);
+            Continue(())
         })
         .await;
 
@@ -113,15 +117,16 @@ async fn example_distinct_until_changed() {
 
     let values: Flow<i32> = flow! {
         for x in [1, 1, 2, 2, 3, 1, 1] {
-            emit!(x);
+            let _ = emit!(x);
         }
     };
 
     print!("  Distinct values: ");
-    values
+    let _ = values
         .distinct_until_changed()
-        .for_each(|x| async move {
+        .collect(|x| async move {
             print!("{} ", x);
+            Continue(())
         })
         .await;
     println!();
@@ -142,16 +147,17 @@ async fn example_drop_take_while() {
 
     let numbers: Flow<i32> = flow! {
         for i in 1..=10 {
-            emit!(i);
+            let _ = emit!(i);
         }
     };
 
     print!("  After drop(3) + takeWhile(< 8): ");
-    numbers
+    let _ = numbers
         .drop_first(3)
         .take_while(|x| *x < 8)
-        .for_each(|x| async move {
+        .collect(|x| async move {
             print!("{} ", x);
+            Continue(())
         })
         .await;
     println!();
@@ -171,21 +177,22 @@ async fn example_flat_map() {
 
     let numbers: Flow<i32> = flow! {
         for i in 1..=3 {
-            emit!(i);
+            let _ = emit!(i);
         }
     };
 
     print!("  Flat mapped: ");
-    numbers
+    let _ = numbers
         .flat_map_sync(|x| {
             let x2 = x * 10;
             flow_fn(move |collector| async move {
-                collector.emit_value(x).await;
-                collector.emit_value(x2).await;
+                let _ = collector.emit(x).await;
+                let _ = collector.emit(x2).await;
             })
         })
-        .for_each(|x| async move {
+        .collect(|x| async move {
             print!("{} ", x);
+            Continue(())
         })
         .await;
     println!();
@@ -233,8 +240,9 @@ async fn example_shared_flow_macro() {
     let handle = tokio::spawn(async move {
         // Use tokio::select! to add a timeout
         let taken_flow = flow.take(2);
-        let collect_future = taken_flow.for_each(|event: String| async move {
+        let collect_future = taken_flow.collect(|event: String| async move {
             println!("  Subscriber received: {}", event);
+            Continue(())
         });
         tokio::select! {
             _ = collect_future => {}
@@ -274,18 +282,19 @@ async fn example_complex_pipeline() {
 
     let numbers: Flow<i32> = flow! {
         for i in 1..=10 {
-            emit!(i);
+            let _ = emit!(i);
         }
     };
 
     // Note: on_each can cause issues with async flow composition
     // Using collect to print instead
-    numbers
+    let _ = numbers
         .filter_sync(|x| *x % 2 == 0) // Even numbers: 2, 4, 6, 8, 10
         .map_sync(|x| x * x) // Square them: 4, 16, 36, 64, 100
         .take(3) // First 3: 4, 16, 36
-        .for_each(|x| async move {
+        .collect(|x| async move {
             println!("  Square: {}", x);
+            Continue(())
         })
         .await;
 
@@ -311,17 +320,18 @@ async fn example_distinct_by_key() {
     }
 
     let users: Flow<User> = flow! {
-        emit!(User { id: 1, name: "Alice".to_string() });
-        emit!(User { id: 1, name: "Alice v2".to_string() });  // Same id, different name
-        emit!(User { id: 2, name: "Bob".to_string() });
-        emit!(User { id: 2, name: "Bob v2".to_string() });  // Same id
+        let _ = emit!(User { id: 1, name: "Alice".to_string() });
+        let _ = emit!(User { id: 1, name: "Alice v2".to_string() });  // Same id, different name
+        let _ = emit!(User { id: 2, name: "Bob".to_string() });
+        let _ = emit!(User { id: 2, name: "Bob v2".to_string() });  // Same id
     };
 
     println!("  Distinct by user ID:");
-    users
+    let _ = users
         .distinct_until_changed_by(|u| u.id)
-        .for_each(|u| async move {
+        .collect(|u| async move {
             println!("    {}:{}", u.id, u.name);
+            Continue(())
         })
         .await;
 
@@ -336,19 +346,20 @@ async fn example_comparison() {
     println!("  Old syntax (verbose):");
     let old_flow = flow_fn(|collector| async move {
         for i in 1..=3 {
-            collector.emit_value(i).await;
+            let _ = collector.emit(i).await;
         }
     });
 
-    old_flow
+    let _ = old_flow
         .clone()
         .map(|x| async move { x * 2 })
         .filter(|x| {
             let x = *x;
             async move { x > 2 }
         })
-        .for_each(|x| async move {
+        .collect(|x| async move {
             println!("    Got: {}", x);
+            Continue(())
         })
         .await;
 
@@ -356,15 +367,16 @@ async fn example_comparison() {
     println!("  New syntax (Kotlin-like):");
     let new_flow: Flow<i32> = flow! {
         for i in 1..=3 {
-            emit!(i);
+            let _ = emit!(i);
         }
     };
 
-    new_flow
+    let _ = new_flow
         .map_sync(|x| x * 2)
         .filter_sync(|x| *x > 2)
-        .for_each(|x| async move {
+        .collect(|x| async move {
             println!("    Got: {}", x);
+            Continue(())
         })
         .await;
 
