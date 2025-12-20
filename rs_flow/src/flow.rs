@@ -170,13 +170,15 @@ where
         Fut: Future<Output = ()> + Send + 'static,
     {
         let f = Arc::new(f);
-        let _ = self.collect(move |value| {
-            let f = Arc::clone(&f);
-            async move {
-                f(value).await;
-                ControlFlow::Continue(())
-            }
-        }).await;
+        let _ = self
+            .collect(move |value| {
+                let f = Arc::clone(&f);
+                async move {
+                    f(value).await;
+                    ControlFlow::Continue(())
+                }
+            })
+            .await;
     }
 
     /// Convert this Flow to a Stream
@@ -291,28 +293,29 @@ where
         // Spawn collection task in current scope if available
         let stopped_clone = Arc::clone(&stopped);
         let task = spawn_in_scope(async move {
-            let _ = flow.collect(move |value| {
-                let tx = tx.clone();
-                let stopped = Arc::clone(&stopped_clone);
-                async move {
-                    use std::ops::ControlFlow::{Break, Continue};
+            let _ = flow
+                .collect(move |value| {
+                    let tx = tx.clone();
+                    let stopped = Arc::clone(&stopped_clone);
+                    async move {
+                        use std::ops::ControlFlow::{Break, Continue};
 
-                    // CRITICAL: Stop immediately if receiver dropped
-                    // Without this check, we busy-loop burning CPU after stream is dropped
-                    if stopped.load(Ordering::Relaxed) {
-                        return Break(());
+                        // CRITICAL: Stop immediately if receiver dropped
+                        // Without this check, we busy-loop burning CPU after stream is dropped
+                        if stopped.load(Ordering::Relaxed) {
+                            return Break(());
+                        }
+
+                        // Try to send - if it fails, receiver is dropped, stop collecting
+                        if tx.send(value).await.is_err() {
+                            stopped.store(true, Ordering::Relaxed);
+                            return Break(());
+                        }
+
+                        Continue(())
                     }
-
-                    // Try to send - if it fails, receiver is dropped, stop collecting
-                    if tx.send(value).await.is_err() {
-                        stopped.store(true, Ordering::Relaxed);
-                        return Break(());
-                    }
-
-                    Continue(())
-                }
-            })
-            .await;
+                })
+                .await;
         });
 
         Self {

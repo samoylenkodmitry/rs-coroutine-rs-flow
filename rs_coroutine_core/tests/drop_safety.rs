@@ -19,16 +19,13 @@ async fn test_with_dispatcher_cancels_on_future_drop() {
     // Start with_dispatcher but timeout before it completes
     let result = timeout(Duration::from_millis(50), async {
         scope
-            .with_dispatcher(
-                Dispatchers::io(),
-                async move {
-                    work_started_clone.notify_one();
-                    // Long-running work
-                    sleep(Duration::from_secs(10)).await;
-                    work_completed_clone.store(true, Ordering::SeqCst);
-                    42
-                },
-            )
+            .with_dispatcher(Dispatchers::io(), async move {
+                work_started_clone.notify_one();
+                // Long-running work
+                sleep(Duration::from_secs(10)).await;
+                work_completed_clone.store(true, Ordering::SeqCst);
+                42
+            })
             .await
     })
     .await;
@@ -60,14 +57,11 @@ async fn test_with_dispatcher_cancels_on_select_drop() {
     // Use timeout to force the select! to drop the with_dispatcher future
     let result = timeout(
         Duration::from_millis(50),
-        scope.with_dispatcher(
-            Dispatchers::io(),
-            async move {
-                // Long-running work that should be cancelled
-                sleep(Duration::from_secs(10)).await;
-                work_completed_clone.store(true, Ordering::SeqCst);
-            },
-        ),
+        scope.with_dispatcher(Dispatchers::io(), async move {
+            // Long-running work that should be cancelled
+            sleep(Duration::from_secs(10)).await;
+            work_completed_clone.store(true, Ordering::SeqCst);
+        }),
     )
     .await;
 

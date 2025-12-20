@@ -150,7 +150,7 @@ where
                 while let Some((v1, v2)) = rx.recv().await {
                     if let (Some(a), Some(b)) = (v1, v2) {
                         match collector.emit(transform(a, b)).await {
-                            Continue(()) => {},
+                            Continue(()) => {}
                             Break(()) => break,
                         }
                     }
@@ -216,7 +216,7 @@ where
                 // Zip values
                 while let (Some(v1), Some(v2)) = (rx1.recv().await, rx2.recv().await) {
                     match collector.emit(transform(v1, v2)).await {
-                        Continue(()) => {},
+                        Continue(()) => {}
                         Break(()) => break,
                     }
                 }
@@ -276,7 +276,7 @@ where
                 while let Some(()) = rx.recv().await {
                     if let Some(value) = latest.lock().await.clone() {
                         match collector.emit(value).await {
-                            Continue(()) => {},
+                            Continue(()) => {}
                             Break(()) => break,
                         }
                     }
@@ -300,22 +300,19 @@ where
                 match first
                     .collect(move |value| {
                         let collector = collector_clone.clone();
-                        async move {
-                            collector.emit(value).await
-                        }
+                        async move { collector.emit(value).await }
                     })
-                    .await {
-                        Continue(()) => {},
-                        Break(()) => return Break(()),
-                    }
+                    .await
+                {
+                    Continue(()) => {}
+                    Break(()) => return Break(()),
+                }
 
                 // Then collect from second flow
                 second
                     .collect(move |value| {
                         let collector = collector.clone();
-                        async move {
-                            collector.emit(value).await
-                        }
+                        async move { collector.emit(value).await }
                     })
                     .await
             }
@@ -335,7 +332,7 @@ where
                 // Emit initial values
                 for value in values {
                     match collector.emit(value).await {
-                        Continue(()) => {},
+                        Continue(()) => {}
                         Break(()) => return Break(()),
                     }
                 }
@@ -344,9 +341,7 @@ where
                 upstream
                     .collect(move |value| {
                         let collector = collector.clone();
-                        async move {
-                            collector.emit(value).await
-                        }
+                        async move { collector.emit(value).await }
                     })
                     .await
             }
@@ -378,17 +373,18 @@ where
                 .map(|flow| {
                     let tx = tx.clone();
                     spawn_in_scope(async move {
-                        let _ = flow.collect(move |value| {
-                            let tx = tx.clone();
-                            async move {
-                                if tx.send(value).await.is_err() {
-                                    Break(())
-                                } else {
-                                    Continue(())
+                        let _ = flow
+                            .collect(move |value| {
+                                let tx = tx.clone();
+                                async move {
+                                    if tx.send(value).await.is_err() {
+                                        Break(())
+                                    } else {
+                                        Continue(())
+                                    }
                                 }
-                            }
-                        })
-                        .await;
+                            })
+                            .await;
                     })
                 })
                 .collect();
@@ -399,7 +395,7 @@ where
             // Emit merged values
             while let Some(value) = rx.recv().await {
                 match collector.emit(value).await {
-                    Continue(()) => {},
+                    Continue(()) => {}
                     Break(()) => break,
                 }
             }

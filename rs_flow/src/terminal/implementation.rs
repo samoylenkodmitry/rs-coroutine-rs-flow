@@ -15,19 +15,20 @@ where
         let found = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let found_clone = Arc::clone(&found);
 
-        let _ = self.collect(move |value| {
-            let result = Arc::clone(&result_clone);
-            let found = Arc::clone(&found_clone);
-            async move {
-                if !found.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                    *result.lock().await = Some(value);
-                    Break(()) // Stop after first element
-                } else {
-                    Continue(())
+        let _ = self
+            .collect(move |value| {
+                let result = Arc::clone(&result_clone);
+                let found = Arc::clone(&found_clone);
+                async move {
+                    if !found.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                        *result.lock().await = Some(value);
+                        Break(()) // Stop after first element
+                    } else {
+                        Continue(())
+                    }
                 }
-            }
-        })
-        .await;
+            })
+            .await;
 
         let value = result.lock().await.take();
         value.ok_or(FlowError::Empty)
@@ -43,18 +44,19 @@ where
         let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let count_clone = Arc::clone(&count);
 
-        let _ = self.collect(move |value| {
-            let result = Arc::clone(&result_clone);
-            let count = Arc::clone(&count_clone);
-            async move {
-                let prev = count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                if prev == 0 {
-                    *result.lock().await = Some(value);
+        let _ = self
+            .collect(move |value| {
+                let result = Arc::clone(&result_clone);
+                let count = Arc::clone(&count_clone);
+                async move {
+                    let prev = count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if prev == 0 {
+                        *result.lock().await = Some(value);
+                    }
+                    Continue(())
                 }
-                Continue(())
-            }
-        })
-        .await;
+            })
+            .await;
 
         let final_count = count.load(std::sync::atomic::Ordering::SeqCst);
         if final_count == 0 {
@@ -75,14 +77,15 @@ where
         let result = Arc::new(Mutex::new(None::<T>));
         let result_clone = Arc::clone(&result);
 
-        let _ = self.collect(move |value| {
-            let result = Arc::clone(&result_clone);
-            async move {
-                *result.lock().await = Some(value);
-                Continue(())
-            }
-        })
-        .await;
+        let _ = self
+            .collect(move |value| {
+                let result = Arc::clone(&result_clone);
+                async move {
+                    *result.lock().await = Some(value);
+                    Continue(())
+                }
+            })
+            .await;
 
         let value = result.lock().await.take();
         value
@@ -92,14 +95,15 @@ where
         let result = Arc::new(Mutex::new(Vec::new()));
         let result_clone = Arc::clone(&result);
 
-        let _ = self.collect(move |value| {
-            let result = Arc::clone(&result_clone);
-            async move {
-                result.lock().await.push(value);
-                Continue(())
-            }
-        })
-        .await;
+        let _ = self
+            .collect(move |value| {
+                let result = Arc::clone(&result_clone);
+                async move {
+                    result.lock().await.push(value);
+                    Continue(())
+                }
+            })
+            .await;
 
         Arc::try_unwrap(result)
             .ok()
@@ -114,14 +118,15 @@ where
         let result = Arc::new(Mutex::new(HashSet::new()));
         let result_clone = Arc::clone(&result);
 
-        let _ = self.collect(move |value| {
-            let result = Arc::clone(&result_clone);
-            async move {
-                result.lock().await.insert(value);
-                Continue(())
-            }
-        })
-        .await;
+        let _ = self
+            .collect(move |value| {
+                let result = Arc::clone(&result_clone);
+                async move {
+                    result.lock().await.insert(value);
+                    Continue(())
+                }
+            })
+            .await;
 
         Arc::try_unwrap(result)
             .ok()
@@ -139,19 +144,20 @@ where
         let acc_clone = Arc::clone(&acc);
         let f_clone = Arc::clone(&f);
 
-        let _ = self.collect(move |value| {
-            let acc = Arc::clone(&acc_clone);
-            let f = Arc::clone(&f_clone);
-            async move {
-                let mut acc_guard = acc.lock().await;
-                let mut f_guard = f.lock().await;
-                if let Some(current) = acc_guard.take() {
-                    *acc_guard = Some(f_guard(current, value));
+        let _ = self
+            .collect(move |value| {
+                let acc = Arc::clone(&acc_clone);
+                let f = Arc::clone(&f_clone);
+                async move {
+                    let mut acc_guard = acc.lock().await;
+                    let mut f_guard = f.lock().await;
+                    if let Some(current) = acc_guard.take() {
+                        *acc_guard = Some(f_guard(current, value));
+                    }
+                    Continue(())
                 }
-                Continue(())
-            }
-        })
-        .await;
+            })
+            .await;
 
         let value = acc.lock().await.take();
         value.expect("fold accumulator missing")
@@ -166,20 +172,21 @@ where
         let acc_clone = Arc::clone(&acc);
         let f_clone = Arc::clone(&f);
 
-        let _ = self.collect(move |value| {
-            let acc = Arc::clone(&acc_clone);
-            let f = Arc::clone(&f_clone);
-            async move {
-                let mut acc_guard = acc.lock().await;
-                let mut f_guard = f.lock().await;
-                *acc_guard = Some(match acc_guard.take() {
-                    None => value,
-                    Some(current) => f_guard(current, value),
-                });
-                Continue(())
-            }
-        })
-        .await;
+        let _ = self
+            .collect(move |value| {
+                let acc = Arc::clone(&acc_clone);
+                let f = Arc::clone(&f_clone);
+                async move {
+                    let mut acc_guard = acc.lock().await;
+                    let mut f_guard = f.lock().await;
+                    *acc_guard = Some(match acc_guard.take() {
+                        None => value,
+                        Some(current) => f_guard(current, value),
+                    });
+                    Continue(())
+                }
+            })
+            .await;
 
         let value = acc.lock().await.take();
         value.ok_or(FlowError::Empty)
@@ -189,14 +196,15 @@ where
         let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let count_clone = Arc::clone(&count);
 
-        let _ = self.collect(move |_| {
-            let count = Arc::clone(&count_clone);
-            async move {
-                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Continue(())
-            }
-        })
-        .await;
+        let _ = self
+            .collect(move |_| {
+                let count = Arc::clone(&count_clone);
+                async move {
+                    count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Continue(())
+                }
+            })
+            .await;
 
         count.load(std::sync::atomic::Ordering::SeqCst)
     }
@@ -210,21 +218,22 @@ where
         let found_clone = Arc::clone(&found);
         let predicate_clone = Arc::clone(&predicate);
 
-        let _ = self.collect(move |value| {
-            let found = Arc::clone(&found_clone);
-            let predicate = Arc::clone(&predicate_clone);
-            async move {
-                if !found.load(std::sync::atomic::Ordering::SeqCst)
-                    && predicate.lock().await(&value)
-                {
-                    found.store(true, std::sync::atomic::Ordering::SeqCst);
-                    Break(()) // Early termination when found
-                } else {
-                    Continue(())
+        let _ = self
+            .collect(move |value| {
+                let found = Arc::clone(&found_clone);
+                let predicate = Arc::clone(&predicate_clone);
+                async move {
+                    if !found.load(std::sync::atomic::Ordering::SeqCst)
+                        && predicate.lock().await(&value)
+                    {
+                        found.store(true, std::sync::atomic::Ordering::SeqCst);
+                        Break(()) // Early termination when found
+                    } else {
+                        Continue(())
+                    }
                 }
-            }
-        })
-        .await;
+            })
+            .await;
 
         found.load(std::sync::atomic::Ordering::SeqCst)
     }
@@ -238,21 +247,22 @@ where
         let all_match_clone = Arc::clone(&all_match);
         let predicate_clone = Arc::clone(&predicate);
 
-        let _ = self.collect(move |value| {
-            let all_match = Arc::clone(&all_match_clone);
-            let predicate = Arc::clone(&predicate_clone);
-            async move {
-                if all_match.load(std::sync::atomic::Ordering::SeqCst)
-                    && !predicate.lock().await(&value)
-                {
-                    all_match.store(false, std::sync::atomic::Ordering::SeqCst);
-                    Break(()) // Early termination when mismatch found
-                } else {
-                    Continue(())
+        let _ = self
+            .collect(move |value| {
+                let all_match = Arc::clone(&all_match_clone);
+                let predicate = Arc::clone(&predicate_clone);
+                async move {
+                    if all_match.load(std::sync::atomic::Ordering::SeqCst)
+                        && !predicate.lock().await(&value)
+                    {
+                        all_match.store(false, std::sync::atomic::Ordering::SeqCst);
+                        Break(()) // Early termination when mismatch found
+                    } else {
+                        Continue(())
+                    }
                 }
-            }
-        })
-        .await;
+            })
+            .await;
 
         all_match.load(std::sync::atomic::Ordering::SeqCst)
     }
@@ -292,9 +302,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_single() {
-        let single_flow = flow(|c| async move {
-            c.emit(42).await
-        });
+        let single_flow = flow(|c| async move { c.emit(42).await });
 
         let result = single_flow.single().await.unwrap();
         assert_eq!(result, 42);
@@ -328,7 +336,7 @@ mod tests {
         let numbers = flow(|c| async move {
             for i in 1..=5 {
                 match c.emit(i).await {
-                    Continue(()) => {},
+                    Continue(()) => {}
                     Break(()) => return Break(()),
                 }
             }
@@ -344,7 +352,7 @@ mod tests {
         let numbers = flow(|c| async move {
             for i in 1..=5 {
                 match c.emit(i).await {
-                    Continue(()) => {},
+                    Continue(()) => {}
                     Break(()) => return Break(()),
                 }
             }
@@ -360,7 +368,7 @@ mod tests {
         let numbers = flow(|c| async move {
             for i in 1..=10 {
                 match c.emit(i).await {
-                    Continue(()) => {},
+                    Continue(()) => {}
                     Break(()) => return Break(()),
                 }
             }
@@ -376,7 +384,7 @@ mod tests {
         let numbers = flow(|c| async move {
             for i in 1..=5 {
                 match c.emit(i).await {
-                    Continue(()) => {},
+                    Continue(()) => {}
                     Break(()) => return Break(()),
                 }
             }
@@ -392,7 +400,7 @@ mod tests {
         let numbers = flow(|c| async move {
             for i in [2, 4, 6, 8] {
                 match c.emit(i).await {
-                    Continue(()) => {},
+                    Continue(()) => {}
                     Break(()) => return Break(()),
                 }
             }

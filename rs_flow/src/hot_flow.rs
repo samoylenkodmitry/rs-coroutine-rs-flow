@@ -34,7 +34,7 @@ where
             async move {
                 while let Ok(value) = rx.recv().await {
                     match collector.emit(value).await {
-                        Continue(()) => {},
+                        Continue(()) => {}
                         Break(()) => return Break(()),
                     }
                 }
@@ -98,7 +98,7 @@ where
                 // Emit the current value first
                 let current = rx.borrow_and_update().clone();
                 match collector.emit(current).await {
-                    Continue(()) => {},
+                    Continue(()) => {}
                     Break(()) => return Break(()),
                 }
 
@@ -106,7 +106,7 @@ where
                 while rx.changed().await.is_ok() {
                     let value = rx.borrow_and_update().clone();
                     match collector.emit(value).await {
-                        Continue(()) => {},
+                        Continue(()) => {}
                         Break(()) => return Break(()),
                     }
                 }

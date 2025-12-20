@@ -68,7 +68,8 @@ where
                     std::task::Poll::Ready(Err(join_err)) if join_err.is_panic() => {
                         // Task panicked - highest priority, return immediately
                         let panic_msg = crate::error::extract_panic_message(join_err);
-                        self.job.complete_with(Err(TaskError::Panicked(panic_msg.clone())));
+                        self.job
+                            .complete_with(Err(TaskError::Panicked(panic_msg.clone())));
                         self.join_completed = true;
                         return std::task::Poll::Ready(Err(TaskError::Panicked(panic_msg)));
                     }
@@ -316,14 +317,16 @@ impl CoroutineScope {
             }
 
             // Run the future in scope, racing against cancellation
-            let result = CURRENT_SCOPE.scope(child_scope, async move {
-                // biased + cancellation-first = deterministic cancellation semantics
-                tokio::select! {
-                    biased;
-                    _ = cancel_token.cancelled() => Err(TaskError::Cancelled),
-                    res = fut => Ok(res),
-                }
-            }).await;
+            let result = CURRENT_SCOPE
+                .scope(child_scope, async move {
+                    // biased + cancellation-first = deterministic cancellation semantics
+                    tokio::select! {
+                        biased;
+                        _ = cancel_token.cancelled() => Err(TaskError::Cancelled),
+                        res = fut => Ok(res),
+                    }
+                })
+                .await;
 
             let _ = tx.send(result);
         });
@@ -378,14 +381,16 @@ impl CoroutineScope {
             }
 
             // Run the future in scope, racing against cancellation
-            let result = CURRENT_SCOPE.scope(child_scope, async move {
-                // biased + cancellation-first = deterministic cancellation semantics
-                tokio::select! {
-                    biased;
-                    _ = cancel_token.cancelled() => Err(TaskError::Cancelled),
-                    res = fut => Ok(res),
-                }
-            }).await;
+            let result = CURRENT_SCOPE
+                .scope(child_scope, async move {
+                    // biased + cancellation-first = deterministic cancellation semantics
+                    tokio::select! {
+                        biased;
+                        _ = cancel_token.cancelled() => Err(TaskError::Cancelled),
+                        res = fut => Ok(res),
+                    }
+                })
+                .await;
 
             // Send result to both Deferred and observer
             let job_outcome = result.as_ref().map(|_| ()).map_err(|e| e.clone());
@@ -484,7 +489,7 @@ pub struct Deferred<T> {
 struct DeferredInner<T> {
     rx: tokio::sync::Mutex<Option<oneshot::Receiver<Result<T, TaskError>>>>,
     cached_result: tokio::sync::Mutex<Option<Result<T, TaskError>>>,
-    result_ready: Arc<tokio::sync::Notify>,  // Notify waiters when result is cached
+    result_ready: Arc<tokio::sync::Notify>, // Notify waiters when result is cached
     job: JobHandle,
 }
 
@@ -528,7 +533,10 @@ impl<T: Clone> Deferred<T> {
 
                 // Result should be cached now
                 let cached = self.inner.cached_result.lock().await;
-                return cached.as_ref().expect("result should be cached after notification").clone();
+                return cached
+                    .as_ref()
+                    .expect("result should be cached after notification")
+                    .clone();
             }
         };
         drop(rx_opt);
@@ -609,7 +617,10 @@ impl<T: Clone> Deferred<T> {
 
             // Result should be cached now
             let cached = self.inner.cached_result.lock().await;
-            return cached.as_ref().expect("result should be cached after notification").clone();
+            return cached
+                .as_ref()
+                .expect("result should be cached after notification")
+                .clone();
         };
 
         // Cache the result

@@ -28,7 +28,7 @@ where
             async move {
                 for item in iter {
                     match collector.emit(item).await {
-                        Continue(()) => {},
+                        Continue(()) => {}
                         Break(()) => return Break(()),
                     }
                 }
@@ -47,9 +47,7 @@ pub fn empty_flow<T: Send + 'static>() -> Flow<T> {
 pub fn flow_of_one<T: Send + Clone + Sync + 'static>(value: T) -> Flow<T> {
     Flow::new(move |collector| {
         let value = value.clone();
-        async move {
-            collector.emit(value).await
-        }
+        async move { collector.emit(value).await }
     })
 }
 
@@ -109,7 +107,7 @@ where
 
             while let Some(value) = rx.recv().await {
                 match collector.emit(value).await {
-                    Continue(()) => {},
+                    Continue(()) => {}
                     Break(()) => break,
                 }
             }
@@ -141,7 +139,7 @@ where
         async move {
             while let Some(value) = generator() {
                 match collector.emit(value).await {
-                    Continue(()) => {},
+                    Continue(()) => {}
                     Break(()) => return Break(()),
                 }
             }
@@ -163,7 +161,7 @@ pub fn repeat_flow<T: Clone + Send + Sync + 'static>(value: T) -> Flow<T> {
         async move {
             loop {
                 match collector.emit(value.clone()).await {
-                    Continue(()) => {},
+                    Continue(()) => {}
                     Break(()) => return Break(()),
                 }
             }
@@ -185,7 +183,7 @@ pub fn interval_flow(period: std::time::Duration) -> Flow<u64> {
         loop {
             interval.tick().await;
             match collector.emit(counter).await {
-                Continue(()) => {},
+                Continue(()) => {}
                 Break(()) => return Break(()),
             }
             counter += 1;

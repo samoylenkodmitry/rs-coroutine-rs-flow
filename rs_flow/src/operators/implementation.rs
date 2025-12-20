@@ -167,7 +167,7 @@ where
 
                 while let Some(value) = rx.recv().await {
                     match collector.emit(value).await {
-                        Continue(()) => {},
+                        Continue(()) => {}
                         Break(()) => break,
                     }
                 }
@@ -204,7 +204,7 @@ where
 
                 while let Some(value) = rx.recv().await {
                     match collector.emit(value).await {
-                        Continue(()) => {},
+                        Continue(()) => {}
                         Break(()) => break,
                     }
                 }
@@ -410,9 +410,7 @@ where
                             inner_flow
                                 .collect(move |inner_value| {
                                     let collector = collector.clone();
-                                    async move {
-                                        collector.emit(inner_value).await
-                                    }
+                                    async move { collector.emit(inner_value).await }
                                 })
                                 .await
                         }

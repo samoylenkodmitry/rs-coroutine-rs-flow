@@ -114,7 +114,7 @@ where
             async move {
                 // Execute start action first
                 match action(collector.clone()).await {
-                    Continue(()) => {},
+                    Continue(()) => {}
                     Break(()) => return Break(()),
                 }
 
@@ -122,9 +122,7 @@ where
                 upstream
                     .collect(move |value| {
                         let collector = collector.clone();
-                        async move {
-                            collector.emit(value).await
-                        }
+                        async move { collector.emit(value).await }
                     })
                     .await
             }
@@ -150,14 +148,13 @@ where
                 match upstream
                     .collect(move |value| {
                         let collector = collector_clone.clone();
-                        async move {
-                            collector.emit(value).await
-                        }
+                        async move { collector.emit(value).await }
                     })
-                    .await {
-                        Continue(()) => {},
-                        Break(()) => return Break(()),
-                    }
+                    .await
+                {
+                    Continue(()) => {}
+                    Break(()) => return Break(()),
+                }
 
                 // Execute completion action (no error in normal case)
                 action(collector, None).await
@@ -187,10 +184,11 @@ where
                             collector.emit(value).await
                         }
                     })
-                    .await {
-                        Continue(()) => {},
-                        Break(()) => return Break(()),
-                    }
+                    .await
+                {
+                    Continue(()) => {}
+                    Break(()) => return Break(()),
+                }
 
                 // If nothing was emitted, execute the action
                 if !emitted.load(std::sync::atomic::Ordering::SeqCst) {
@@ -218,9 +216,7 @@ where
                     upstream
                         .collect(move |value| {
                             let collector = collector_clone.clone();
-                            async move {
-                                collector.emit(value).await
-                            }
+                            async move { collector.emit(value).await }
                         })
                         .await
                 });
@@ -259,9 +255,7 @@ where
                         upstream_clone
                             .collect(move |value| {
                                 let collector = collector_clone.clone();
-                                async move {
-                                    collector.emit(value).await
-                                }
+                                async move { collector.emit(value).await }
                             })
                             .await
                     });
@@ -356,10 +350,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_on_empty_not_triggered() {
-        let flow = flow(|c| async move {
-            c.emit(1).await
-        })
-        .on_empty(|c| async move {
+        let flow = flow(|c| async move { c.emit(1).await }).on_empty(|c| async move {
             c.emit(42).await // Should not be called
         });
 
@@ -371,12 +362,12 @@ mod tests {
     async fn test_with_timeout() {
         let flow = flow(|c| async move {
             match c.emit(1).await {
-                Continue(()) => {},
+                Continue(()) => {}
                 Break(()) => return Break(()),
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
             match c.emit(2).await {
-                Continue(()) => {},
+                Continue(()) => {}
                 Break(()) => return Break(()),
             }
             tokio::time::sleep(Duration::from_millis(200)).await;

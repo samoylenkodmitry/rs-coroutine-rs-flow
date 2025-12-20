@@ -339,17 +339,20 @@ mod tests {
 
         // Wrap in scope for structured concurrency
         let scope = CoroutineScope::new(Dispatcher::default());
-        scope.launch(async move {
-            numbers
-                .take(3)
-                .for_each(move |x| {
-                    let collected = Arc::clone(&collected_clone);
-                    async move {
-                        collected.lock().await.push(x);
-                    }
-                })
-                .await;
-        }).join().await;
+        scope
+            .launch(async move {
+                numbers
+                    .take(3)
+                    .for_each(move |x| {
+                        let collected = Arc::clone(&collected_clone);
+                        async move {
+                            collected.lock().await.push(x);
+                        }
+                    })
+                    .await;
+            })
+            .join()
+            .await;
 
         let result = collected.lock().await;
         assert_eq!(*result, vec![1, 2, 3]);

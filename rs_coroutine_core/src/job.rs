@@ -1,5 +1,5 @@
-use std::sync::{Arc, Mutex as StdMutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
@@ -136,7 +136,7 @@ impl JobHandle {
 
         // Now check if already completed
         if self.is_completed.load(Ordering::Acquire) {
-            return;  // Drop the notified future, we don't need it
+            return; // Drop the notified future, we don't need it
         }
 
         // Wait for notification (we're already registered as a waiter)
@@ -197,7 +197,10 @@ impl JobHandle {
     pub(crate) fn complete_with(&self, result: Result<(), TaskError>) {
         // CRITICAL: Use blocking lock, not try_lock
         // If this blocks, it's only for microseconds (tiny critical section)
-        let mut outcome = self.outcome.lock().expect("JobHandle outcome mutex poisoned");
+        let mut outcome = self
+            .outcome
+            .lock()
+            .expect("JobHandle outcome mutex poisoned");
 
         // Determine if we should update the outcome (allow upgrades to "worse" outcomes)
         let should_update = match (&*outcome, &result) {
@@ -260,12 +263,16 @@ impl<T> AbortOnDrop<T> {
 
     /// Get a reference to the handle
     pub fn handle(&self) -> &tokio::task::JoinHandle<T> {
-        self.handle.as_ref().expect("AbortOnDrop handle already taken")
+        self.handle
+            .as_ref()
+            .expect("AbortOnDrop handle already taken")
     }
 
     /// Take the handle, disabling automatic abort
     pub fn into_inner(mut self) -> tokio::task::JoinHandle<T> {
-        self.handle.take().expect("AbortOnDrop handle already taken")
+        self.handle
+            .take()
+            .expect("AbortOnDrop handle already taken")
     }
 
     /// Abort the task

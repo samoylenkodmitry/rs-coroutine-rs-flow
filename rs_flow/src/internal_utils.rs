@@ -62,10 +62,7 @@ where
             // We're in a scope - use structured spawning
             let cancel_token = scope.cancel_token.clone();
             let job = scope.launch(fut);
-            ScopeAwareHandle {
-                job,
-                cancel_token,
-            }
+            ScopeAwareHandle { job, cancel_token }
         }
         Err(_) => {
             // No scope available - PANIC to enforce structured concurrency
