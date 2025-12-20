@@ -139,6 +139,8 @@ pub struct CoroutineScope {
     /// Currently unused - reserved for future scope lifecycle tracking
     pub job: JobHandle,
     pub cancel_token: CancelToken,
+    /// Track observer tasks so they can be cancelled when scope is cancelled
+    observers: Arc<std::sync::Mutex<Vec<tokio::task::AbortHandle>>>,
 }
 
 impl CoroutineScope {
@@ -150,6 +152,7 @@ impl CoroutineScope {
             dispatcher,
             job: JobHandle::new(cancel_token.clone()),
             cancel_token,
+            observers: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -172,6 +175,7 @@ impl CoroutineScope {
             dispatcher: self.dispatcher.clone(),
             job: job.clone(),
             cancel_token: child_token.clone(),
+            observers: Arc::new(std::sync::Mutex::new(Vec::new())),
         });
 
         let job_for_observer = job.clone();
@@ -226,8 +230,9 @@ impl CoroutineScope {
         // - launch() returns immediately (fire-and-forget)
         // - Observer must await JoinHandle to detect panics
         // - Observer completes JobHandle asynchronously
-        // A future improvement would track observers and abort them on scope cancellation.
-        self.dispatcher.clone().spawn(async move {
+        //
+        // CRITICAL FIX: Now tracking observers so they can be aborted on scope.cancel()
+        let observer_handle = self.dispatcher.clone().spawn(async move {
             match join_handle.await {
                 Ok(()) => {
                     // Task completed - get the actual outcome from the oneshot
@@ -253,6 +258,11 @@ impl CoroutineScope {
                 }
             }
         });
+
+        // Track observer for cancellation
+        if let Ok(mut observers) = self.observers.lock() {
+            observers.push(observer_handle.abort_handle());
+        }
 
         job
     }
@@ -290,6 +300,7 @@ impl CoroutineScope {
             dispatcher: dispatcher.clone(),
             job: job.clone(),
             cancel_token: child_token.clone(),
+            observers: Arc::new(std::sync::Mutex::new(Vec::new())),
         });
         let cancel_token = child_scope.cancel_token.clone();
         let job_for_future = job.clone();
@@ -348,6 +359,7 @@ impl CoroutineScope {
             dispatcher: dispatcher.clone(),
             job: job.clone(),
             cancel_token: child_token.clone(),
+            observers: Arc::new(std::sync::Mutex::new(Vec::new())),
         });
         let cancel_token = child_scope.cancel_token.clone();
         let job_for_observer = job.clone();
@@ -385,9 +397,8 @@ impl CoroutineScope {
         //
         // CRITICAL FIX: Use dispatcher.spawn() instead of tokio::spawn()
         // This keeps the observer within the dispatcher's execution context.
-        // While not perfect (observers still can't be individually cancelled),
-        // this is better than completely detached tokio::spawn().
-        dispatcher.spawn(async move {
+        // Now also tracking observers so they can be aborted on scope.cancel()
+        let observer_handle = dispatcher.spawn(async move {
             match join_handle.await {
                 Ok(()) => {
                     // Task completed - get actual outcome from select site
@@ -412,10 +423,16 @@ impl CoroutineScope {
             }
         });
 
+        // Track observer for cancellation
+        if let Ok(mut observers) = self.observers.lock() {
+            observers.push(observer_handle.abort_handle());
+        }
+
         Deferred {
             inner: Arc::new(DeferredInner {
                 rx: tokio::sync::Mutex::new(Some(rx)),
                 cached_result: tokio::sync::Mutex::new(None),
+                result_ready: Arc::new(tokio::sync::Notify::new()),
                 job,
             }),
             parent_cancel_token: self.cancel_token.clone(),
@@ -426,8 +443,17 @@ impl CoroutineScope {
     ///
     /// Cancellation is propagated via the CancelToken hierarchy.
     /// All tasks waiting on this scope's token (or child tokens) will observe cancellation.
+    ///
+    /// CRITICAL FIX: Now also aborts all observer tasks to prevent them from outliving scope.
     pub fn cancel(&self) {
         self.cancel_token.cancel();
+
+        // Abort all observer tasks
+        if let Ok(mut observers) = self.observers.lock() {
+            for handle in observers.drain(..) {
+                handle.abort();
+            }
+        }
     }
 
     /// Check if this scope is cancelled
@@ -458,6 +484,7 @@ pub struct Deferred<T> {
 struct DeferredInner<T> {
     rx: tokio::sync::Mutex<Option<oneshot::Receiver<Result<T, TaskError>>>>,
     cached_result: tokio::sync::Mutex<Option<Result<T, TaskError>>>,
+    result_ready: Arc<tokio::sync::Notify>,  // Notify waiters when result is cached
     job: JobHandle,
 }
 
@@ -495,15 +522,13 @@ impl<T: Clone> Deferred<T> {
             Some(receiver) => receiver,
             None => {
                 // Receiver was already taken by another awaiter
-                // Wait for them to cache the result
+                // Wait for notification when result is ready (no busy-wait!)
                 drop(rx_opt);
-                loop {
-                    tokio::task::yield_now().await;
-                    let cached = self.inner.cached_result.lock().await;
-                    if let Some(result) = cached.as_ref() {
-                        return result.clone();
-                    }
-                }
+                self.inner.result_ready.notified().await;
+
+                // Result should be cached now
+                let cached = self.inner.cached_result.lock().await;
+                return cached.as_ref().expect("result should be cached after notification").clone();
             }
         };
         drop(rx_opt);
@@ -536,6 +561,9 @@ impl<T: Clone> Deferred<T> {
             let mut cached = self.inner.cached_result.lock().await;
             *cached = Some(result.clone());
         }
+
+        // Wake all waiting tasks (no more busy-wait!)
+        self.inner.result_ready.notify_waiters();
 
         result
     }
@@ -575,15 +603,13 @@ impl<T: Clone> Deferred<T> {
             drop(rx_opt);
             rx.await.unwrap_or(Err(TaskError::Aborted))
         } else {
-            // Receiver already taken - wait for cached result
+            // Receiver already taken - wait for notification (no busy-wait!)
             drop(rx_opt);
-            loop {
-                tokio::task::yield_now().await;
-                let cached = self.inner.cached_result.lock().await;
-                if let Some(result) = cached.as_ref() {
-                    return result.clone();
-                }
-            }
+            self.inner.result_ready.notified().await;
+
+            // Result should be cached now
+            let cached = self.inner.cached_result.lock().await;
+            return cached.as_ref().expect("result should be cached after notification").clone();
         };
 
         // Cache the result
@@ -591,6 +617,9 @@ impl<T: Clone> Deferred<T> {
             let mut cached = self.inner.cached_result.lock().await;
             *cached = Some(result.clone());
         }
+
+        // Wake all waiting tasks
+        self.inner.result_ready.notify_waiters();
 
         result
     }
