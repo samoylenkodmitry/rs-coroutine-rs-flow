@@ -1,5 +1,4 @@
 use coroflow::{flow_fn, FlowExt, SharedFlow, StateFlow, SuspendingExt};
-use std::ops::ControlFlow::Continue;
 use rs_coroutine_core::{CoroutineScope, Dispatchers};
 use std::sync::Arc;
 use std::time::Duration;
@@ -123,7 +122,7 @@ async fn example_cold_flows() {
     let numbers = flow_fn(|collector| async move {
         for i in 1..=5 {
             println!("Emitting {}", i);
-            let _ = collector.emit(i).await;
+            collector.emit(i).await;
             sleep(Duration::from_millis(100)).await;
         }
     });
@@ -134,8 +133,7 @@ async fn example_cold_flows() {
         .clone()
         .map(|x| async move { x * 2 })
         .take(3)
-        .collect(|x| async move { println!("Received: {}", x);
-            Continue(())
+        .collect(|x| async move { println!("Received: {}", x)
         })
         .await;
 
@@ -148,7 +146,7 @@ async fn example_flow_operators() {
 
     let numbers = flow_fn(|collector| async move {
         for i in 1..=10 {
-            let _ = collector.emit(i).await;
+            collector.emit(i).await;
         }
     });
 
@@ -160,8 +158,7 @@ async fn example_flow_operators() {
         })
         .map(|x| async move { x * x })
         .take(3)
-        .collect(|x| async move { println!("  {}", x);
-            Continue(())
+        .collect(|x| async move { println!("  {}", x)
         })
         .await;
 
@@ -181,8 +178,7 @@ async fn example_shared_flow() {
     let collector1 = tokio::spawn(async move {
         let _ = flow1
             .take(3)
-            .collect(|x| async move { println!("Subscriber 1: {}", x);
-            Continue(())
+            .collect(|x| async move { println!("Subscriber 1: {}", x)
         })
             .await;
     });
@@ -190,8 +186,7 @@ async fn example_shared_flow() {
     let collector2 = tokio::spawn(async move {
         let _ = flow2
             .take(3)
-            .collect(|x| async move { println!("Subscriber 2: {}", x);
-            Continue(())
+            .collect(|x| async move { println!("Subscriber 2: {}", x)
         })
             .await;
     });
@@ -221,8 +216,7 @@ async fn example_state_flow() {
     let flow = state.as_flow();
     let collector = tokio::spawn(async move {
         let _ = flow.take(4)
-            .collect(|state| async move { println!("State: {}", describe_state(&state));
-            Continue(())
+            .collect(|state| async move { println!("State: {}", describe_state(&state))
         })
             .await;
     });
@@ -269,17 +263,15 @@ async fn example_suspending() {
 
     // Collect multiple times (each collection re-executes the block)
     println!("First collection:");
-    let _ = user_flow
+    user_flow
         .clone()
-        .collect(|u| async move { println!("  {:?}", u);
-            Continue(())
+        .collect(|u| async move { println!("  {:?}", u)
         })
         .await;
 
     println!("Second collection:");
-    let _ = user_flow
-        .collect(|u| async move { println!("  {:?}", u);
-            Continue(())
+    user_flow
+        .collect(|u| async move { println!("  {:?}", u)
         })
         .await;
 

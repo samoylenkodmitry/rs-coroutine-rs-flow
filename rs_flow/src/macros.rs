@@ -39,7 +39,7 @@ macro_rules! flow {
 #[macro_export]
 macro_rules! emit_to {
     ($collector:expr, $value:expr) => {
-        $collector.emit($value).await
+        $collector.emit_with_control($value).await
     };
 }
 
@@ -262,7 +262,7 @@ mod tests {
         let collected_clone = Arc::clone(&collected);
 
         let _ = numbers
-            .collect(move |x| {
+            .collect_with_control(move |x| {
                 let collected = Arc::clone(&collected_clone);
                 async move {
                     collected.lock().await.push(x);
@@ -308,7 +308,7 @@ mod tests {
                     .map_sync(|x| x * 2)
                     .filter_sync(|x| *x > 5)
                     .take(3)
-                    .collect(move |x| {
+                    .collect_with_control(move |x| {
                         let collected = Arc::clone(&collected_clone);
                         async move {
                             collected.lock().await.push(x);
@@ -330,7 +330,7 @@ mod tests {
 
         let numbers: Flow<i32> = flow_fn(|collector| async move {
             for i in 1..=10 {
-                collector.emit_value(i).await;
+                collector.emit(i).await;
             }
         });
 
@@ -343,7 +343,7 @@ mod tests {
             .launch(async move {
                 numbers
                     .take(3)
-                    .for_each(move |x| {
+                    .collect(move |x| {
                         let collected = Arc::clone(&collected_clone);
                         async move {
                             collected.lock().await.push(x);

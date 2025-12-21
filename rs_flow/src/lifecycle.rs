@@ -19,7 +19,7 @@ where
     /// # Example
     /// ```ignore
     /// flow.on_start(|collector| async move {
-    ///     collector.emit(Loading).await;
+    ///     collector.emit_with_control(Loading).await;
     /// })
     /// ```
     fn on_start<F, Fut>(self, action: F) -> Flow<T>
@@ -35,7 +35,7 @@ where
     /// ```ignore
     /// flow.on_completion(|collector, error| async move {
     ///     if error.is_none() {
-    ///         collector.emit(Done).await;
+    ///         collector.emit_with_control(Done).await;
     ///     }
     /// })
     /// ```
@@ -54,7 +54,7 @@ where
     /// # Example
     /// ```ignore
     /// flow.on_empty(|collector| async move {
-    ///     collector.emit(default_value).await;
+    ///     collector.emit_with_control(default_value).await;
     /// })
     /// ```
     fn on_empty<F, Fut>(self, action: F) -> Flow<T>
@@ -71,7 +71,7 @@ where
     /// # Example
     /// ```ignore
     /// flow.catch_panic(|collector, panic_info| async move {
-    ///     collector.emit(default_value).await;
+    ///     collector.emit_with_control(default_value).await;
     /// })
     /// ```
     fn catch_panic<F, Fut>(self, handler: F) -> Flow<T>
@@ -120,9 +120,9 @@ where
 
                 // Then collect from upstream
                 upstream
-                    .collect(move |value| {
+                    .collect_with_control(move |value| {
                         let collector = collector.clone();
-                        async move { collector.emit(value).await }
+                        async move { collector.emit_with_control(value).await }
                     })
                     .await
             }
@@ -146,9 +146,9 @@ where
 
                 // Collect from upstream (catching panics would require more infrastructure)
                 match upstream
-                    .collect(move |value| {
+                    .collect_with_control(move |value| {
                         let collector = collector_clone.clone();
-                        async move { collector.emit(value).await }
+                        async move { collector.emit_with_control(value).await }
                     })
                     .await
                 {
@@ -176,12 +176,12 @@ where
                 let collector_clone = collector.clone();
 
                 match upstream
-                    .collect(move |value| {
+                    .collect_with_control(move |value| {
                         let collector = collector_clone.clone();
                         let emitted = Arc::clone(&emitted_clone);
                         async move {
                             emitted.store(true, std::sync::atomic::Ordering::SeqCst);
-                            collector.emit(value).await
+                            collector.emit_with_control(value).await
                         }
                     })
                     .await
@@ -214,9 +214,9 @@ where
                 // Use catch_unwind for panic handling
                 let result = std::panic::AssertUnwindSafe(async {
                     upstream
-                        .collect(move |value| {
+                        .collect_with_control(move |value| {
                             let collector = collector_clone.clone();
-                            async move { collector.emit(value).await }
+                            async move { collector.emit_with_control(value).await }
                         })
                         .await
                 });
@@ -253,9 +253,9 @@ where
 
                     let result = std::panic::AssertUnwindSafe(async {
                         upstream_clone
-                            .collect(move |value| {
+                            .collect_with_control(move |value| {
                                 let collector = collector_clone.clone();
-                                async move { collector.emit(value).await }
+                                async move { collector.emit_with_control(value).await }
                             })
                             .await
                     });
@@ -284,10 +284,10 @@ where
                 tokio::select! {
                     result = async {
                         upstream
-                            .collect(move |value| {
+                            .collect_with_control(move |value| {
                                 let collector = collector_clone.clone();
                                 async move {
-                                    collector.emit(value).await
+                                    collector.emit_with_control(value).await
                                 }
                             })
                             .await
@@ -312,11 +312,11 @@ mod tests {
     #[tokio::test]
     async fn test_on_start() {
         let flow = flow(|c| async move {
-            let _ = c.emit(2).await;
-            c.emit(3).await
+            let _ = c.emit_with_control(2).await;
+            c.emit_with_control(3).await
         })
         .on_start(|c| async move {
-            c.emit(1).await // Emit 1 before others
+            c.emit_with_control(1).await // Emit 1 before others
         });
 
         let result = flow.to_vec().await;
@@ -326,11 +326,11 @@ mod tests {
     #[tokio::test]
     async fn test_on_completion() {
         let flow = flow(|c| async move {
-            let _ = c.emit(1).await;
-            c.emit(2).await
+            let _ = c.emit_with_control(1).await;
+            c.emit_with_control(2).await
         })
         .on_completion(|c, _error| async move {
-            c.emit(3).await // Emit 3 at the end
+            c.emit_with_control(3).await // Emit 3 at the end
         });
 
         let result = flow.to_vec().await;
@@ -341,7 +341,7 @@ mod tests {
     async fn test_on_empty() {
         let empty: Flow<i32> = flow(|_c| async move { Continue(()) });
         let flow = empty.on_empty(|c| async move {
-            c.emit(42).await // Emit default value
+            c.emit_with_control(42).await // Emit default value
         });
 
         let result = flow.to_vec().await;
@@ -350,8 +350,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_on_empty_not_triggered() {
-        let flow = flow(|c| async move { c.emit(1).await }).on_empty(|c| async move {
-            c.emit(42).await // Should not be called
+        let flow = flow(|c| async move { c.emit_with_control(1).await }).on_empty(|c| async move {
+            c.emit_with_control(42).await // Should not be called
         });
 
         let result = flow.to_vec().await;
@@ -361,17 +361,17 @@ mod tests {
     #[tokio::test]
     async fn test_with_timeout() {
         let flow = flow(|c| async move {
-            match c.emit(1).await {
+            match c.emit_with_control(1).await {
                 Continue(()) => {}
                 Break(()) => return Break(()),
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
-            match c.emit(2).await {
+            match c.emit_with_control(2).await {
                 Continue(()) => {}
                 Break(()) => return Break(()),
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
-            c.emit(3).await // Should not be emitted
+            c.emit_with_control(3).await // Should not be emitted
         })
         .with_timeout(Duration::from_millis(250));
 

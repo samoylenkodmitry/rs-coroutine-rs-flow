@@ -33,7 +33,7 @@ where
             let mut rx = rx.resubscribe();
             async move {
                 while let Ok(value) = rx.recv().await {
-                    match collector.emit(value).await {
+                    match collector.emit_with_control(value).await {
                         Continue(()) => {}
                         Break(()) => return Break(()),
                     }
@@ -97,7 +97,7 @@ where
             async move {
                 // Emit the current value first
                 let current = rx.borrow_and_update().clone();
-                match collector.emit(current).await {
+                match collector.emit_with_control(current).await {
                     Continue(()) => {}
                     Break(()) => return Break(()),
                 }
@@ -105,7 +105,7 @@ where
                 // Then emit all subsequent updates
                 while rx.changed().await.is_ok() {
                     let value = rx.borrow_and_update().clone();
-                    match collector.emit(value).await {
+                    match collector.emit_with_control(value).await {
                         Continue(()) => {}
                         Break(()) => return Break(()),
                     }

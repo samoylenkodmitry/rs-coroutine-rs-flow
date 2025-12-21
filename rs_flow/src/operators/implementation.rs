@@ -30,12 +30,12 @@ where
             let f = Arc::clone(&f);
             async move {
                 upstream
-                    .collect(move |value| {
+                    .collect_with_control(move |value| {
                         let f = Arc::clone(&f);
                         let collector = collector.clone();
                         async move {
                             let mapped = f(value).await;
-                            collector.emit(mapped).await
+                            collector.emit_with_control(mapped).await
                         }
                     })
                     .await
@@ -55,12 +55,12 @@ where
             let predicate = Arc::clone(&predicate);
             async move {
                 upstream
-                    .collect(move |value| {
+                    .collect_with_control(move |value| {
                         let predicate = Arc::clone(&predicate);
                         let collector = collector.clone();
                         async move {
                             if predicate(&value).await {
-                                collector.emit(value).await
+                                collector.emit_with_control(value).await
                             } else {
                                 Continue(())
                             }
@@ -88,7 +88,7 @@ where
                 // Spawn upstream collection in current scope if available
                 let producer = spawn_in_scope(async move {
                     let _ = upstream
-                        .collect(move |value| {
+                        .collect_with_control(move |value| {
                             let tx = tx.clone();
                             let done = Arc::clone(&done_clone);
                             async move {
@@ -111,7 +111,7 @@ where
                 let mut received = 0;
                 while received < count {
                     if let Some(value) = rx.recv().await {
-                        match collector.emit(value).await {
+                        match collector.emit_with_control(value).await {
                             Continue(()) => received += 1,
                             Break(()) => break,
                         }
@@ -143,7 +143,7 @@ where
                 let stopped_clone = Arc::clone(&stopped);
                 let producer = spawn_in_scope(async move {
                     let _ = upstream
-                        .collect(move |value| {
+                        .collect_with_control(move |value| {
                             let tx = tx.clone();
                             let stopped = Arc::clone(&stopped_clone);
                             async move {
@@ -166,7 +166,7 @@ where
                 .into_cancel_on_drop();
 
                 while let Some(value) = rx.recv().await {
-                    match collector.emit(value).await {
+                    match collector.emit_with_control(value).await {
                         Continue(()) => {}
                         Break(()) => break,
                     }
@@ -189,7 +189,7 @@ where
                 let producer_dispatcher = dispatcher.clone();
                 producer_dispatcher.spawn(async move {
                     let _ = upstream
-                        .collect(move |value| {
+                        .collect_with_control(move |value| {
                             let tx = tx.clone();
                             async move {
                                 if tx.send(value).await.is_err() {
@@ -203,7 +203,7 @@ where
                 });
 
                 while let Some(value) = rx.recv().await {
-                    match collector.emit(value).await {
+                    match collector.emit_with_control(value).await {
                         Continue(()) => {}
                         Break(()) => break,
                     }
@@ -237,7 +237,7 @@ where
                         let f = Arc::clone(&f);
                         async move {
                             let _ = upstream
-                                .collect(move |value| {
+                                .collect_with_control(move |value| {
                                     let f = Arc::clone(&f);
                                     let tx = tx.clone();
                                     async move {
@@ -287,7 +287,7 @@ where
                                     // Finish current stream if any, then exit
                                     if let Some(stream) = current_stream.as_mut() {
                                         while let Some(value) = stream.next().await {
-                                            match collector.emit(value).await {
+                                            match collector.emit_with_control(value).await {
                                                 Continue(()) => {},
                                                 Break(()) => break,
                                             }
@@ -308,7 +308,7 @@ where
                             }
                         } => {
                             if let Some(v) = value {
-                                match collector.emit(v).await {
+                                match collector.emit_with_control(v).await {
                                     Continue(()) => {},
                                     Break(()) => break,
                                 }
@@ -338,12 +338,12 @@ where
             let f = Arc::clone(&f);
             async move {
                 upstream
-                    .collect(move |value| {
+                    .collect_with_control(move |value| {
                         let f = Arc::clone(&f);
                         let collector = collector.clone();
                         async move {
                             let mapped = f(value);
-                            collector.emit(mapped).await
+                            collector.emit_with_control(mapped).await
                         }
                     })
                     .await
@@ -362,12 +362,12 @@ where
             let predicate = Arc::clone(&predicate);
             async move {
                 upstream
-                    .collect(move |value| {
+                    .collect_with_control(move |value| {
                         let predicate = Arc::clone(&predicate);
                         let collector = collector.clone();
                         async move {
                             if predicate(&value) {
-                                collector.emit(value).await
+                                collector.emit_with_control(value).await
                             } else {
                                 Continue(())
                             }
@@ -402,15 +402,15 @@ where
             let f = Arc::clone(&f);
             async move {
                 upstream
-                    .collect(move |value| {
+                    .collect_with_control(move |value| {
                         let f = Arc::clone(&f);
                         let collector = collector.clone();
                         async move {
                             let inner_flow = f(value).await;
                             inner_flow
-                                .collect(move |inner_value| {
+                                .collect_with_control(move |inner_value| {
                                     let collector = collector.clone();
-                                    async move { collector.emit(inner_value).await }
+                                    async move { collector.emit_with_control(inner_value).await }
                                 })
                                 .await
                         }
@@ -443,12 +443,12 @@ where
             let f = Arc::clone(&f);
             async move {
                 upstream
-                    .collect(move |value| {
+                    .collect_with_control(move |value| {
                         let f = Arc::clone(&f);
                         let collector = collector.clone();
                         async move {
                             f(&value);
-                            collector.emit(value).await
+                            collector.emit_with_control(value).await
                         }
                     })
                     .await
@@ -468,12 +468,12 @@ where
             let f = Arc::clone(&f);
             async move {
                 upstream
-                    .collect(move |value| {
+                    .collect_with_control(move |value| {
                         let f = Arc::clone(&f);
                         let collector = collector.clone();
                         async move {
                             f(&value).await;
-                            collector.emit(value).await
+                            collector.emit_with_control(value).await
                         }
                     })
                     .await
@@ -487,13 +487,13 @@ where
             async move {
                 let dropped = Arc::new(AtomicUsize::new(0));
                 upstream
-                    .collect(move |value| {
+                    .collect_with_control(move |value| {
                         let collector = collector.clone();
                         let dropped = Arc::clone(&dropped);
                         async move {
                             let current = dropped.fetch_add(1, Ordering::SeqCst);
                             if current >= count {
-                                collector.emit(value).await
+                                collector.emit_with_control(value).await
                             } else {
                                 Continue(())
                             }
@@ -516,7 +516,7 @@ where
             async move {
                 let dropping = Arc::new(AtomicBool::new(true));
                 upstream
-                    .collect(move |value| {
+                    .collect_with_control(move |value| {
                         let predicate = Arc::clone(&predicate);
                         let collector = collector.clone();
                         let dropping = Arc::clone(&dropping);
@@ -524,12 +524,12 @@ where
                             if dropping.load(Ordering::SeqCst) {
                                 if !predicate(&value) {
                                     dropping.store(false, Ordering::SeqCst);
-                                    collector.emit(value).await
+                                    collector.emit_with_control(value).await
                                 } else {
                                     Continue(())
                                 }
                             } else {
-                                collector.emit(value).await
+                                collector.emit_with_control(value).await
                             }
                         }
                     })
@@ -550,13 +550,13 @@ where
             async move {
                 let done = Arc::new(AtomicBool::new(false));
                 upstream
-                    .collect(move |value| {
+                    .collect_with_control(move |value| {
                         let predicate = Arc::clone(&predicate);
                         let collector = collector.clone();
                         let done = Arc::clone(&done);
                         async move {
                             if !done.load(Ordering::SeqCst) && predicate(&value) {
-                                collector.emit(value).await
+                                collector.emit_with_control(value).await
                             } else {
                                 done.store(true, Ordering::SeqCst);
                                 Break(())
@@ -577,7 +577,7 @@ where
             async move {
                 let last = Arc::new(tokio::sync::Mutex::new(None::<T>));
                 upstream
-                    .collect(move |value| {
+                    .collect_with_control(move |value| {
                         let collector = collector.clone();
                         let last = Arc::clone(&last);
                         async move {
@@ -589,7 +589,7 @@ where
                             if should_emit {
                                 *guard = Some(value.clone());
                                 drop(guard);
-                                collector.emit(value).await
+                                collector.emit_with_control(value).await
                             } else {
                                 Continue(())
                             }
@@ -613,7 +613,7 @@ where
             async move {
                 let last_key = Arc::new(tokio::sync::Mutex::new(None::<K>));
                 upstream
-                    .collect(move |value| {
+                    .collect_with_control(move |value| {
                         let collector = collector.clone();
                         let last_key = Arc::clone(&last_key);
                         let key_selector = Arc::clone(&key_selector);
@@ -627,7 +627,7 @@ where
                             if should_emit {
                                 *guard = Some(key);
                                 drop(guard);
-                                collector.emit(value).await
+                                collector.emit_with_control(value).await
                             } else {
                                 Continue(())
                             }

@@ -36,20 +36,20 @@ impl<T> FlowCollector<T> {
     /// ```ignore
     /// // Check for early termination
     /// for i in 1..=100 {
-    ///     match collector.emit(i).await {
+    ///     match collector.emit_with_control(i).await {
     ///         Continue(()) => {}, // Keep going
     ///         Break(()) => break, // Stop early
     ///     }
     /// }
     /// ```
-    pub async fn emit(&self, value: T) -> ControlFlow<()> {
+    pub async fn emit_with_control(&self, value: T) -> ControlFlow<()> {
         (self.emit_fn)(value).await
     }
 
-    /// Emit a value to the collector (ergonomic API)
+    /// Emit a value to the collector (Kotlin-style ergonomic API)
     ///
-    /// This is the ergonomic alternative to `emit()` that doesn't return
-    /// `ControlFlow`. Use this when you don't need to check for early termination.
+    /// This is the Kotlin-like API that matches `emit(x)` from Kotlin coroutines.
+    /// It doesn't return `ControlFlow`, making it simple and ergonomic.
     ///
     /// # ⚠️ WARNING: Ignores Downstream Termination
     ///
@@ -57,12 +57,12 @@ impl<T> FlowCollector<T> {
     /// operators like `take()`, `first()`, etc. This means your producer will
     /// continue emitting ALL values even if the consumer stopped listening.
     ///
-    /// **When to use `emit_value()`:**
+    /// **When to use `emit()`:**
     /// - Small, finite data sources (e.g., emitting 5-10 values)
     /// - When you know downstream will consume everything
     /// - Simple test cases
     ///
-    /// **When NOT to use `emit_value()` (use `emit()` instead):**
+    /// **When NOT to use `emit()` (use `emit_with_control()` instead):**
     /// - Large or infinite data sources (e.g., emitting 1000+ values)
     /// - With downstream operators like `.take(5)` or `.first()`
     /// - When performance matters (avoiding wasted work)
@@ -72,25 +72,25 @@ impl<T> FlowCollector<T> {
     /// // ❌ BAD: Emits all 1000 values even though downstream only wants 5!
     /// let flow = flow_fn(|collector| async move {
     ///     for i in 1..=1000 {
-    ///         collector.emit_value(i).await;  // Ignores termination!
+    ///         collector.emit_with_control(i).await;  // Ignores termination!
     ///     }
     /// });
-    /// flow.take(5).for_each(|x| async move { println!("{}", x) }).await;
+    /// flow.take(5).collect(|x| async move { println!("{}", x) }).await;
     ///
     /// // ✅ GOOD: Stops emitting after 5 values
     /// let flow = flow(|collector| async move {
     ///     for i in 1..=1000 {
-    ///         match collector.emit(i).await {
+    ///         match collector.emit_with_control(i).await {
     ///             Continue(()) => {},
     ///             Break(()) => break,  // Downstream signaled termination!
     ///         }
     ///     }
     ///     Continue(())
     /// });
-    /// flow.take(5).for_each(|x| async move { println!("{}", x) }).await;
+    /// flow.take(5).collect(|x| async move { println!("{}", x) }).await;
     /// ```
-    pub async fn emit_value(&self, value: T) {
-        let _ = self.emit(value).await;
+    pub async fn emit(&self, value: T) {
+        let _ = self.emit_with_control(value).await;
     }
 }
 
@@ -131,17 +131,17 @@ where
         Self::new(collect_fn)
     }
 
-    /// Collect values from this flow with control flow support
+    /// Collect values from this flow with control flow support (low-level API)
     ///
     /// This is the low-level API that allows operators to signal early termination
-    /// via `ControlFlow::Break`. Most users should use `for_each()` instead.
+    /// via `ControlFlow::Break`. Most users should use `collect()` instead.
     ///
     /// Use this when you need to:
     /// - Stop upstream emission early (e.g., implementing `take`)
     /// - Propagate termination signals between operators
     ///
-    /// For simple collection without early termination, use `for_each()`.
-    pub async fn collect<F, Fut>(&self, on_value: F) -> ControlFlow<()>
+    /// For simple collection without early termination, use `collect()`.
+    pub async fn collect_with_control<F, Fut>(&self, on_value: F) -> ControlFlow<()>
     where
         F: Fn(T) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = ControlFlow<()>> + Send + 'static,
@@ -150,28 +150,28 @@ where
         (self.collect_fn)(collector).await
     }
 
-    /// Perform an action for each value in the flow (ergonomic API)
+    /// Collect values from this flow (Kotlin-style ergonomic API)
     ///
-    /// This is the ergonomic alternative to `collect()` for users who don't need
-    /// early termination control. The closure returns `()` instead of `ControlFlow<()>`.
+    /// This is the Kotlin-like API that matches `collect { }` from Kotlin coroutines.
+    /// The closure returns `()` instead of `ControlFlow<()>`, making it simple and ergonomic.
     ///
     /// # Example
     /// ```ignore
-    /// flow.for_each(|value| async move {
+    /// flow.collect(|value| async move {
     ///     println!("Got: {}", value);
     /// }).await;
     /// ```
     ///
     /// If you need to stop collection early based on values, use `take()`, `take_while()`,
-    /// or other operators before calling `for_each()`.
-    pub async fn for_each<F, Fut>(&self, f: F)
+    /// or other operators before calling `collect()`.
+    pub async fn collect<F, Fut>(&self, f: F)
     where
         F: Fn(T) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
         let f = Arc::new(f);
         let _ = self
-            .collect(move |value| {
+            .collect_with_control(move |value| {
                 let f = Arc::clone(&f);
                 async move {
                     f(value).await;
@@ -294,7 +294,7 @@ where
         let stopped_clone = Arc::clone(&stopped);
         let task = spawn_in_scope(async move {
             let _ = flow
-                .collect(move |value| {
+                .collect_with_control(move |value| {
                     let tx = tx.clone();
                     let stopped = Arc::clone(&stopped_clone);
                     async move {

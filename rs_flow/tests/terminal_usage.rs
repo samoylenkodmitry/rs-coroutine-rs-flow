@@ -4,7 +4,7 @@ use coroflow::{flow_fn, FlowCollector, FlowError, FlowTerminal};
 async fn terminal_collectors_handle_counts_and_aggregation() {
     let series = flow_fn(|collector| async move {
         for value in [1, 2, 3] {
-            collector.emit_value(value).await;
+            collector.emit(value).await;
         }
     });
 
@@ -28,8 +28,8 @@ async fn terminal_collectors_handle_counts_and_aggregation() {
 #[tokio::test]
 async fn single_reports_errors_on_extra_elements() {
     let with_two = flow_fn(|collector| async move {
-        collector.emit_value(1).await;
-        collector.emit_value(2).await;
+        collector.emit(1).await;
+        collector.emit(2).await;
     });
 
     let error = with_two

@@ -27,7 +27,7 @@ where
             let iter = self.clone().into_iter();
             async move {
                 for item in iter {
-                    match collector.emit(item).await {
+                    match collector.emit_with_control(item).await {
                         Continue(()) => {}
                         Break(()) => return Break(()),
                     }
@@ -47,7 +47,7 @@ pub fn empty_flow<T: Send + 'static>() -> Flow<T> {
 pub fn flow_of_one<T: Send + Clone + Sync + 'static>(value: T) -> Flow<T> {
     Flow::new(move |collector| {
         let value = value.clone();
-        async move { collector.emit(value).await }
+        async move { collector.emit_with_control(value).await }
     })
 }
 
@@ -106,7 +106,7 @@ where
             let producer = spawn_in_scope(fut);
 
             while let Some(value) = rx.recv().await {
-                match collector.emit(value).await {
+                match collector.emit_with_control(value).await {
                     Continue(()) => {}
                     Break(()) => break,
                 }
@@ -138,7 +138,7 @@ where
         let generator = Arc::clone(&generator);
         async move {
             while let Some(value) = generator() {
-                match collector.emit(value).await {
+                match collector.emit_with_control(value).await {
                     Continue(()) => {}
                     Break(()) => return Break(()),
                 }
@@ -160,7 +160,7 @@ pub fn repeat_flow<T: Clone + Send + Sync + 'static>(value: T) -> Flow<T> {
         let value = value.clone();
         async move {
             loop {
-                match collector.emit(value.clone()).await {
+                match collector.emit_with_control(value.clone()).await {
                     Continue(()) => {}
                     Break(()) => return Break(()),
                 }
@@ -182,7 +182,7 @@ pub fn interval_flow(period: std::time::Duration) -> Flow<u64> {
 
         loop {
             interval.tick().await;
-            match collector.emit(counter).await {
+            match collector.emit_with_control(counter).await {
                 Continue(()) => {}
                 Break(()) => return Break(()),
             }

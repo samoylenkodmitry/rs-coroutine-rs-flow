@@ -16,7 +16,7 @@ where
         let found_clone = Arc::clone(&found);
 
         let _ = self
-            .collect(move |value| {
+            .collect_with_control(move |value| {
                 let result = Arc::clone(&result_clone);
                 let found = Arc::clone(&found_clone);
                 async move {
@@ -45,7 +45,7 @@ where
         let count_clone = Arc::clone(&count);
 
         let _ = self
-            .collect(move |value| {
+            .collect_with_control(move |value| {
                 let result = Arc::clone(&result_clone);
                 let count = Arc::clone(&count_clone);
                 async move {
@@ -78,7 +78,7 @@ where
         let result_clone = Arc::clone(&result);
 
         let _ = self
-            .collect(move |value| {
+            .collect_with_control(move |value| {
                 let result = Arc::clone(&result_clone);
                 async move {
                     *result.lock().await = Some(value);
@@ -96,7 +96,7 @@ where
         let result_clone = Arc::clone(&result);
 
         let _ = self
-            .collect(move |value| {
+            .collect_with_control(move |value| {
                 let result = Arc::clone(&result_clone);
                 async move {
                     result.lock().await.push(value);
@@ -119,7 +119,7 @@ where
         let result_clone = Arc::clone(&result);
 
         let _ = self
-            .collect(move |value| {
+            .collect_with_control(move |value| {
                 let result = Arc::clone(&result_clone);
                 async move {
                     result.lock().await.insert(value);
@@ -145,7 +145,7 @@ where
         let f_clone = Arc::clone(&f);
 
         let _ = self
-            .collect(move |value| {
+            .collect_with_control(move |value| {
                 let acc = Arc::clone(&acc_clone);
                 let f = Arc::clone(&f_clone);
                 async move {
@@ -173,7 +173,7 @@ where
         let f_clone = Arc::clone(&f);
 
         let _ = self
-            .collect(move |value| {
+            .collect_with_control(move |value| {
                 let acc = Arc::clone(&acc_clone);
                 let f = Arc::clone(&f_clone);
                 async move {
@@ -197,7 +197,7 @@ where
         let count_clone = Arc::clone(&count);
 
         let _ = self
-            .collect(move |_| {
+            .collect_with_control(move |_| {
                 let count = Arc::clone(&count_clone);
                 async move {
                     count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -219,7 +219,7 @@ where
         let predicate_clone = Arc::clone(&predicate);
 
         let _ = self
-            .collect(move |value| {
+            .collect_with_control(move |value| {
                 let found = Arc::clone(&found_clone);
                 let predicate = Arc::clone(&predicate_clone);
                 async move {
@@ -248,7 +248,7 @@ where
         let predicate_clone = Arc::clone(&predicate);
 
         let _ = self
-            .collect(move |value| {
+            .collect_with_control(move |value| {
                 let all_match = Arc::clone(&all_match_clone);
                 let predicate = Arc::clone(&predicate_clone);
                 async move {
@@ -283,9 +283,9 @@ mod tests {
     #[tokio::test]
     async fn test_first() {
         let numbers = flow(|c| async move {
-            let _ = c.emit(1).await;
-            let _ = c.emit(2).await;
-            let _ = c.emit(3).await;
+            let _ = c.emit_with_control(1).await;
+            let _ = c.emit_with_control(2).await;
+            let _ = c.emit_with_control(3).await;
             Continue(())
         });
 
@@ -302,7 +302,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_single() {
-        let single_flow = flow(|c| async move { c.emit(42).await });
+        let single_flow = flow(|c| async move { c.emit_with_control(42).await });
 
         let result = single_flow.single().await.unwrap();
         assert_eq!(result, 42);
@@ -311,8 +311,8 @@ mod tests {
     #[tokio::test]
     async fn test_single_multiple() {
         let multiple = flow(|c| async move {
-            let _ = c.emit(1).await;
-            c.emit(2).await
+            let _ = c.emit_with_control(1).await;
+            c.emit_with_control(2).await
         });
 
         let result = multiple.single().await;
@@ -322,9 +322,9 @@ mod tests {
     #[tokio::test]
     async fn test_to_vec() {
         let numbers = flow(|c| async move {
-            let _ = c.emit(1).await;
-            let _ = c.emit(2).await;
-            c.emit(3).await
+            let _ = c.emit_with_control(1).await;
+            let _ = c.emit_with_control(2).await;
+            c.emit_with_control(3).await
         });
 
         let vec = numbers.to_vec().await;
@@ -335,7 +335,7 @@ mod tests {
     async fn test_fold() {
         let numbers = flow(|c| async move {
             for i in 1..=5 {
-                match c.emit(i).await {
+                match c.emit_with_control(i).await {
                     Continue(()) => {}
                     Break(()) => return Break(()),
                 }
@@ -351,7 +351,7 @@ mod tests {
     async fn test_reduce() {
         let numbers = flow(|c| async move {
             for i in 1..=5 {
-                match c.emit(i).await {
+                match c.emit_with_control(i).await {
                     Continue(()) => {}
                     Break(()) => return Break(()),
                 }
@@ -367,7 +367,7 @@ mod tests {
     async fn test_count() {
         let numbers = flow(|c| async move {
             for i in 1..=10 {
-                match c.emit(i).await {
+                match c.emit_with_control(i).await {
                     Continue(()) => {}
                     Break(()) => return Break(()),
                 }
@@ -383,7 +383,7 @@ mod tests {
     async fn test_any() {
         let numbers = flow(|c| async move {
             for i in 1..=5 {
-                match c.emit(i).await {
+                match c.emit_with_control(i).await {
                     Continue(()) => {}
                     Break(()) => return Break(()),
                 }
@@ -399,7 +399,7 @@ mod tests {
     async fn test_all() {
         let numbers = flow(|c| async move {
             for i in [2, 4, 6, 8] {
-                match c.emit(i).await {
+                match c.emit_with_control(i).await {
                     Continue(()) => {}
                     Break(()) => return Break(()),
                 }
