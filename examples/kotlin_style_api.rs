@@ -30,9 +30,7 @@ async fn example_flow_macro() {
 
     // Collect with simple println
     numbers
-        .collect(|x| async move {
-            println!("  Received: {}", x);
-        })
+        .collect(|x| async move { println!("  Received: {}", x) })
         .await;
 
     println!();
@@ -63,9 +61,7 @@ async fn example_sync_operators() {
         .map_sync(|x| x * 2)
         .filter_sync(|x| *x > 5)
         .take(3)
-        .collect(|x| async move {
-            println!("  Got: {}", x);
-        })
+        .collect(|x| async move { println!("  Got: {}", x) })
         .await;
 
     println!();
@@ -92,9 +88,7 @@ async fn example_on_each() {
     numbers
         .on_each(|x| println!("  Processing: {}", x))
         .map_sync(|x| x * 2)
-        .collect(|x| async move {
-            println!("  Result: {}", x);
-        })
+        .collect(|x| async move { println!("  Result: {}", x) })
         .await;
 
     println!();
@@ -120,9 +114,7 @@ async fn example_distinct_until_changed() {
     print!("  Distinct values: ");
     values
         .distinct_until_changed()
-        .collect(|x| async move {
-            print!("{} ", x);
-        })
+        .collect(|x| async move { print!("{} ", x) })
         .await;
     println!();
     println!();
@@ -150,9 +142,7 @@ async fn example_drop_take_while() {
     numbers
         .drop_first(3)
         .take_while(|x| *x < 8)
-        .collect(|x| async move {
-            print!("{} ", x);
-        })
+        .collect(|x| async move { print!("{} ", x) })
         .await;
     println!();
     println!();
@@ -184,9 +174,7 @@ async fn example_flat_map() {
                 collector.emit(x2).await;
             })
         })
-        .collect(|x| async move {
-            print!("{} ", x);
-        })
+        .collect(|x| async move { print!("{} ", x) })
         .await;
     println!();
     println!();
@@ -233,9 +221,8 @@ async fn example_shared_flow_macro() {
     let handle = tokio::spawn(async move {
         // Use tokio::select! to add a timeout
         let taken_flow = flow.take(2);
-        let collect_future = taken_flow.collect(|event: String| async move {
-            println!("  Subscriber received: {}", event);
-        });
+        let collect_future = taken_flow
+            .collect(|event: String| async move { println!("  Subscriber received: {}", event) });
         tokio::select! {
             _ = collect_future => {}
             _ = sleep(Duration::from_secs(2)) => {
@@ -284,9 +271,7 @@ async fn example_complex_pipeline() {
         .filter_sync(|x| *x % 2 == 0) // Even numbers: 2, 4, 6, 8, 10
         .map_sync(|x| x * x) // Square them: 4, 16, 36, 64, 100
         .take(3) // First 3: 4, 16, 36
-        .collect(|x| async move {
-            println!("  Square: {}", x);
-        })
+        .collect(|x| async move { println!("  Square: {}", x) })
         .await;
 
     println!();
@@ -320,9 +305,7 @@ async fn example_distinct_by_key() {
     println!("  Distinct by user ID:");
     users
         .distinct_until_changed_by(|u| u.id)
-        .collect(|u| async move {
-            println!("    {}:{}", u.id, u.name);
-        })
+        .collect(|u| async move { println!("    {}:{}", u.id, u.name) })
         .await;
 
     println!();
@@ -347,9 +330,7 @@ async fn example_comparison() {
             let x = *x;
             async move { x > 2 }
         })
-        .collect(|x| async move {
-            println!("    Got: {}", x);
-        })
+        .collect(|x| async move { println!("    Got: {}", x) })
         .await;
 
     // NEW (Kotlin-like) syntax:
@@ -363,9 +344,7 @@ async fn example_comparison() {
     new_flow
         .map_sync(|x| x * 2)
         .filter_sync(|x| *x > 2)
-        .collect(|x| async move {
-            println!("    Got: {}", x);
-        })
+        .collect(|x| async move { println!("    Got: {}", x) })
         .await;
 
     println!();

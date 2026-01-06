@@ -5,6 +5,7 @@
 
 use crate::flow::Flow;
 use std::future::Future;
+use std::ops::ControlFlow::{Break, Continue};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -26,8 +27,12 @@ where
             let iter = self.clone().into_iter();
             async move {
                 for item in iter {
-                    collector.emit(item).await;
+                    match collector.emit_with_control(item).await {
+                        Continue(()) => {}
+                        Break(()) => return Break(()),
+                    }
                 }
+                Continue(())
             }
         })
     }
@@ -35,16 +40,14 @@ where
 
 /// Create a flow that emits no values
 pub fn empty_flow<T: Send + 'static>() -> Flow<T> {
-    Flow::new(|_collector| async move {})
+    Flow::new(|_collector| async move { Continue(()) })
 }
 
 /// Create a flow from a single value
 pub fn flow_of_one<T: Send + Clone + Sync + 'static>(value: T) -> Flow<T> {
     Flow::new(move |collector| {
         let value = value.clone();
-        async move {
-            collector.emit(value).await;
-        }
+        async move { collector.emit_with_control(value).await }
     })
 }
 
@@ -92,6 +95,7 @@ where
     F: Fn(mpsc::Sender<T>) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = ()> + Send + 'static,
 {
+    use crate::internal_utils::spawn_in_scope;
     let builder = Arc::new(builder);
     Flow::new(move |collector| {
         let builder = Arc::clone(&builder);
@@ -99,13 +103,17 @@ where
             let (tx, mut rx) = mpsc::channel(16);
 
             let fut = builder(tx);
-            let producer = tokio::spawn(fut);
+            let producer = spawn_in_scope(fut);
 
             while let Some(value) = rx.recv().await {
-                collector.emit(value).await;
+                match collector.emit_with_control(value).await {
+                    Continue(()) => {}
+                    Break(()) => break,
+                }
             }
 
-            let _ = producer.await;
+            producer.join().await;
+            Continue(())
         }
     })
 }
@@ -130,8 +138,12 @@ where
         let generator = Arc::clone(&generator);
         async move {
             while let Some(value) = generator() {
-                collector.emit(value).await;
+                match collector.emit_with_control(value).await {
+                    Continue(()) => {}
+                    Break(()) => return Break(()),
+                }
             }
+            Continue(())
         }
     })
 }
@@ -148,7 +160,10 @@ pub fn repeat_flow<T: Clone + Send + Sync + 'static>(value: T) -> Flow<T> {
         let value = value.clone();
         async move {
             loop {
-                collector.emit(value.clone()).await;
+                match collector.emit_with_control(value.clone()).await {
+                    Continue(()) => {}
+                    Break(()) => return Break(()),
+                }
             }
         }
     })
@@ -167,7 +182,10 @@ pub fn interval_flow(period: std::time::Duration) -> Flow<u64> {
 
         loop {
             interval.tick().await;
-            collector.emit(counter).await;
+            match collector.emit_with_control(counter).await {
+                Continue(()) => {}
+                Break(()) => return Break(()),
+            }
             counter += 1;
         }
     })
@@ -237,14 +255,29 @@ mod tests {
 
     #[tokio::test]
     async fn test_channel_flow() {
+        use crate::{CoroutineScope, Dispatcher};
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
         let flow = channel_flow(|tx| async move {
             tx.send(1).await.ok();
             tx.send(2).await.ok();
             tx.send(3).await.ok();
         });
 
-        let result = flow.to_vec().await;
-        assert_eq!(result, vec![1, 2, 3]);
+        // Wrap in scope for structured concurrency
+        let scope = CoroutineScope::new(Dispatcher::default());
+        let result = Arc::new(Mutex::new(Vec::new()));
+        let result_clone = Arc::clone(&result);
+        scope
+            .launch(async move {
+                let vec = flow.to_vec().await;
+                *result_clone.lock().await = vec;
+            })
+            .join()
+            .await;
+        let result = result.lock().await;
+        assert_eq!(*result, vec![1, 2, 3]);
     }
 
     #[tokio::test]
@@ -257,9 +290,24 @@ mod tests {
     #[tokio::test]
     async fn test_repeat_flow() {
         use crate::operators::FlowExt;
+        use crate::{CoroutineScope, Dispatcher};
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
 
         let flow = repeat_flow(42).take(3);
-        let result = flow.to_vec().await;
-        assert_eq!(result, vec![42, 42, 42]);
+
+        // Wrap in scope for structured concurrency
+        let scope = CoroutineScope::new(Dispatcher::default());
+        let result = Arc::new(Mutex::new(Vec::new()));
+        let result_clone = Arc::clone(&result);
+        scope
+            .launch(async move {
+                let vec = flow.to_vec().await;
+                *result_clone.lock().await = vec;
+            })
+            .join()
+            .await;
+        let result = result.lock().await;
+        assert_eq!(*result, vec![42, 42, 42]);
     }
 }

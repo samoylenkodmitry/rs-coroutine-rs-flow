@@ -5,6 +5,7 @@
 
 use crate::flow::{Flow, FlowCollector};
 use std::future::Future;
+use std::ops::ControlFlow::{Break, Continue};
 use std::sync::Arc;
 
 /// Lifecycle operators for Flow
@@ -18,13 +19,13 @@ where
     /// # Example
     /// ```ignore
     /// flow.on_start(|collector| async move {
-    ///     collector.emit(Loading).await;
+    ///     collector.emit_with_control(Loading).await;
     /// })
     /// ```
     fn on_start<F, Fut>(self, action: F) -> Flow<T>
     where
         F: FnOnce(FlowCollector<T>) -> Fut + Send + Sync + 'static + Clone,
-        Fut: Future<Output = ()> + Send + 'static;
+        Fut: Future<Output = std::ops::ControlFlow<()>> + Send + 'static;
 
     /// Execute an action when flow completes (successfully or with error).
     /// The action receives `None` on success, or `Some(error)` on failure.
@@ -34,7 +35,7 @@ where
     /// ```ignore
     /// flow.on_completion(|collector, error| async move {
     ///     if error.is_none() {
-    ///         collector.emit(Done).await;
+    ///         collector.emit_with_control(Done).await;
     ///     }
     /// })
     /// ```
@@ -45,7 +46,7 @@ where
             + Sync
             + 'static
             + Clone,
-        Fut: Future<Output = ()> + Send + 'static;
+        Fut: Future<Output = std::ops::ControlFlow<()>> + Send + 'static;
 
     /// Execute an action if the flow completes without emitting any values.
     /// The action can emit default values.
@@ -53,13 +54,13 @@ where
     /// # Example
     /// ```ignore
     /// flow.on_empty(|collector| async move {
-    ///     collector.emit(default_value).await;
+    ///     collector.emit_with_control(default_value).await;
     /// })
     /// ```
     fn on_empty<F, Fut>(self, action: F) -> Flow<T>
     where
         F: FnOnce(FlowCollector<T>) -> Fut + Send + Sync + 'static + Clone,
-        Fut: Future<Output = ()> + Send + 'static;
+        Fut: Future<Output = std::ops::ControlFlow<()>> + Send + 'static;
 
     /// Catch and handle errors from upstream.
     /// The handler can emit recovery values or re-throw.
@@ -70,13 +71,13 @@ where
     /// # Example
     /// ```ignore
     /// flow.catch_panic(|collector, panic_info| async move {
-    ///     collector.emit(default_value).await;
+    ///     collector.emit_with_control(default_value).await;
     /// })
     /// ```
     fn catch_panic<F, Fut>(self, handler: F) -> Flow<T>
     where
         F: FnOnce(FlowCollector<T>, String) -> Fut + Send + Sync + 'static + Clone,
-        Fut: Future<Output = ()> + Send + 'static;
+        Fut: Future<Output = std::ops::ControlFlow<()>> + Send + 'static;
 
     /// Retry the flow on failure up to `max_retries` times.
     ///
@@ -105,24 +106,25 @@ where
     fn on_start<F, Fut>(self, action: F) -> Flow<T>
     where
         F: FnOnce(FlowCollector<T>) -> Fut + Send + Sync + 'static + Clone,
-        Fut: Future<Output = ()> + Send + 'static,
+        Fut: Future<Output = std::ops::ControlFlow<()>> + Send + 'static,
     {
         Flow::new(move |collector| {
             let upstream = self.clone();
             let action = action.clone();
             async move {
                 // Execute start action first
-                action(collector.clone()).await;
+                match action(collector.clone()).await {
+                    Continue(()) => {}
+                    Break(()) => return Break(()),
+                }
 
                 // Then collect from upstream
                 upstream
-                    .collect(move |value| {
+                    .collect_with_control(move |value| {
                         let collector = collector.clone();
-                        async move {
-                            collector.emit(value).await;
-                        }
+                        async move { collector.emit_with_control(value).await }
                     })
-                    .await;
+                    .await
             }
         })
     }
@@ -134,7 +136,7 @@ where
             + Sync
             + 'static
             + Clone,
-        Fut: Future<Output = ()> + Send + 'static,
+        Fut: Future<Output = std::ops::ControlFlow<()>> + Send + 'static,
     {
         Flow::new(move |collector| {
             let upstream = self.clone();
@@ -143,17 +145,19 @@ where
                 let collector_clone = collector.clone();
 
                 // Collect from upstream (catching panics would require more infrastructure)
-                upstream
-                    .collect(move |value| {
+                match upstream
+                    .collect_with_control(move |value| {
                         let collector = collector_clone.clone();
-                        async move {
-                            collector.emit(value).await;
-                        }
+                        async move { collector.emit_with_control(value).await }
                     })
-                    .await;
+                    .await
+                {
+                    Continue(()) => {}
+                    Break(()) => return Break(()),
+                }
 
                 // Execute completion action (no error in normal case)
-                action(collector, None).await;
+                action(collector, None).await
             }
         })
     }
@@ -161,7 +165,7 @@ where
     fn on_empty<F, Fut>(self, action: F) -> Flow<T>
     where
         F: FnOnce(FlowCollector<T>) -> Fut + Send + Sync + 'static + Clone,
-        Fut: Future<Output = ()> + Send + 'static,
+        Fut: Future<Output = std::ops::ControlFlow<()>> + Send + 'static,
     {
         Flow::new(move |collector| {
             let upstream = self.clone();
@@ -171,20 +175,26 @@ where
                 let emitted_clone = Arc::clone(&emitted);
                 let collector_clone = collector.clone();
 
-                upstream
-                    .collect(move |value| {
+                match upstream
+                    .collect_with_control(move |value| {
                         let collector = collector_clone.clone();
                         let emitted = Arc::clone(&emitted_clone);
                         async move {
                             emitted.store(true, std::sync::atomic::Ordering::SeqCst);
-                            collector.emit(value).await;
+                            collector.emit_with_control(value).await
                         }
                     })
-                    .await;
+                    .await
+                {
+                    Continue(()) => {}
+                    Break(()) => return Break(()),
+                }
 
                 // If nothing was emitted, execute the action
                 if !emitted.load(std::sync::atomic::Ordering::SeqCst) {
-                    action(collector).await;
+                    action(collector).await
+                } else {
+                    Continue(())
                 }
             }
         })
@@ -193,7 +203,7 @@ where
     fn catch_panic<F, Fut>(self, handler: F) -> Flow<T>
     where
         F: FnOnce(FlowCollector<T>, String) -> Fut + Send + Sync + 'static + Clone,
-        Fut: Future<Output = ()> + Send + 'static,
+        Fut: Future<Output = std::ops::ControlFlow<()>> + Send + 'static,
     {
         Flow::new(move |collector| {
             let upstream = self.clone();
@@ -204,17 +214,15 @@ where
                 // Use catch_unwind for panic handling
                 let result = std::panic::AssertUnwindSafe(async {
                     upstream
-                        .collect(move |value| {
+                        .collect_with_control(move |value| {
                             let collector = collector_clone.clone();
-                            async move {
-                                collector.emit(value).await;
-                            }
+                            async move { collector.emit_with_control(value).await }
                         })
-                        .await;
+                        .await
                 });
 
                 match futures::FutureExt::catch_unwind(result).await {
-                    Ok(()) => {}
+                    Ok(ctrl) => ctrl,
                     Err(panic) => {
                         let panic_msg = if let Some(s) = panic.downcast_ref::<&str>() {
                             s.to_string()
@@ -223,7 +231,7 @@ where
                         } else {
                             "Unknown panic".to_string()
                         };
-                        handler(collector, panic_msg).await;
+                        handler(collector, panic_msg).await
                     }
                 }
             }
@@ -245,17 +253,15 @@ where
 
                     let result = std::panic::AssertUnwindSafe(async {
                         upstream_clone
-                            .collect(move |value| {
+                            .collect_with_control(move |value| {
                                 let collector = collector_clone.clone();
-                                async move {
-                                    collector.emit(value).await;
-                                }
+                                async move { collector.emit_with_control(value).await }
                             })
-                            .await;
+                            .await
                     });
 
                     match futures::FutureExt::catch_unwind(result).await {
-                        Ok(()) => break, // Success
+                        Ok(ctrl) => return ctrl, // Success
                         Err(_) if attempts < max_retries => {
                             attempts += 1;
                             continue; // Retry
@@ -276,18 +282,19 @@ where
                 let collector_clone = collector.clone();
 
                 tokio::select! {
-                    _ = async {
+                    result = async {
                         upstream
-                            .collect(move |value| {
+                            .collect_with_control(move |value| {
                                 let collector = collector_clone.clone();
                                 async move {
-                                    collector.emit(value).await;
+                                    collector.emit_with_control(value).await
                                 }
                             })
-                            .await;
-                    } => {}
+                            .await
+                    } => result,
                     _ = tokio::time::sleep(duration) => {
                         // Timeout - flow completes without emitting more
+                        Continue(())
                     }
                 }
             }
@@ -305,11 +312,11 @@ mod tests {
     #[tokio::test]
     async fn test_on_start() {
         let flow = flow(|c| async move {
-            c.emit(2).await;
-            c.emit(3).await;
+            let _ = c.emit_with_control(2).await;
+            c.emit_with_control(3).await
         })
         .on_start(|c| async move {
-            c.emit(1).await; // Emit 1 before others
+            c.emit_with_control(1).await // Emit 1 before others
         });
 
         let result = flow.to_vec().await;
@@ -319,11 +326,11 @@ mod tests {
     #[tokio::test]
     async fn test_on_completion() {
         let flow = flow(|c| async move {
-            c.emit(1).await;
-            c.emit(2).await;
+            let _ = c.emit_with_control(1).await;
+            c.emit_with_control(2).await
         })
         .on_completion(|c, _error| async move {
-            c.emit(3).await; // Emit 3 at the end
+            c.emit_with_control(3).await // Emit 3 at the end
         });
 
         let result = flow.to_vec().await;
@@ -332,9 +339,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_on_empty() {
-        let empty: Flow<i32> = flow(|_c| async move {});
+        let empty: Flow<i32> = flow(|_c| async move { Continue(()) });
         let flow = empty.on_empty(|c| async move {
-            c.emit(42).await; // Emit default value
+            c.emit_with_control(42).await // Emit default value
         });
 
         let result = flow.to_vec().await;
@@ -343,11 +350,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_on_empty_not_triggered() {
-        let flow = flow(|c| async move {
-            c.emit(1).await;
-        })
-        .on_empty(|c| async move {
-            c.emit(42).await; // Should not be called
+        let flow = flow(|c| async move { c.emit_with_control(1).await }).on_empty(|c| async move {
+            c.emit_with_control(42).await // Should not be called
         });
 
         let result = flow.to_vec().await;
@@ -357,11 +361,17 @@ mod tests {
     #[tokio::test]
     async fn test_with_timeout() {
         let flow = flow(|c| async move {
-            c.emit(1).await;
+            match c.emit_with_control(1).await {
+                Continue(()) => {}
+                Break(()) => return Break(()),
+            }
             tokio::time::sleep(Duration::from_millis(100)).await;
-            c.emit(2).await;
+            match c.emit_with_control(2).await {
+                Continue(()) => {}
+                Break(()) => return Break(()),
+            }
             tokio::time::sleep(Duration::from_millis(200)).await;
-            c.emit(3).await; // Should not be emitted
+            c.emit_with_control(3).await // Should not be emitted
         })
         .with_timeout(Duration::from_millis(250));
 

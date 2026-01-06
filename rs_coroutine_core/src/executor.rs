@@ -2,9 +2,26 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+/// Type-erased join handle that can be awaited to detect panics
+///
+/// **Note:** This is explicitly a Tokio `JoinHandle`. This library is **tokio-only**
+/// and does not abstract over other async runtimes. The JoinHandle is required for
+/// proper panic detection using `JoinError::is_panic()`.
+pub type BoxedJoinHandle = tokio::task::JoinHandle<()>;
+
 /// Minimal executor trait for spawning futures
+///
+/// **Note:** This trait is **tokio-specific** and cannot be implemented for other runtimes.
+/// The return type `BoxedJoinHandle` is `tokio::task::JoinHandle<()>`, which is required
+/// for proper panic detection. This library makes no attempt to abstract over async runtimes.
+///
+/// The trait exists primarily for:
+/// - Testing/mocking purposes
+/// - Potential future runtime configuration (e.g., different tokio runtime flavors)
+///
+/// But it is **not** a generic executor abstraction.
 pub trait Executor: Send + Sync + 'static {
-    fn spawn(&self, fut: Pin<Box<dyn Future<Output = ()> + Send + 'static>>);
+    fn spawn(&self, fut: Pin<Box<dyn Future<Output = ()> + Send + 'static>>) -> BoxedJoinHandle;
 }
 
 /// Dispatcher wraps an Executor and provides a cloneable interface
@@ -20,8 +37,9 @@ impl Dispatcher {
     }
 
     /// Spawn a future on this dispatcher
-    pub fn spawn(&self, fut: impl Future<Output = ()> + Send + 'static) {
-        self.inner.spawn(Box::pin(fut));
+    /// Returns a JoinHandle that can be used to detect panics
+    pub fn spawn(&self, fut: impl Future<Output = ()> + Send + 'static) -> BoxedJoinHandle {
+        self.inner.spawn(Box::pin(fut))
     }
 }
 
@@ -29,8 +47,8 @@ impl Dispatcher {
 pub struct TokioExecutor;
 
 impl Executor for TokioExecutor {
-    fn spawn(&self, fut: Pin<Box<dyn Future<Output = ()> + Send + 'static>>) {
-        tokio::spawn(fut);
+    fn spawn(&self, fut: Pin<Box<dyn Future<Output = ()> + Send + 'static>>) -> BoxedJoinHandle {
+        tokio::spawn(fut)
     }
 }
 

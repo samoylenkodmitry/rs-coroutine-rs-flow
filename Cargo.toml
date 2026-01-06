@@ -15,5 +15,6 @@ description = "Composable coroutine utilities and flow abstractions built on top
 
 [workspace.dependencies]
 tokio = { version = "1.35", features = ["full"] }
+tokio-util = "0.7"
 futures = "0.3"
 pin-project = "1.1"

@@ -26,7 +26,8 @@ macro_rules! flow {
                     __collector__.emit($value).await
                 };
             }
-            $($body)*
+            $($body)*;
+            std::ops::ControlFlow::Continue(())
         })
     }};
 }
@@ -38,7 +39,7 @@ macro_rules! flow {
 #[macro_export]
 macro_rules! emit_to {
     ($collector:expr, $value:expr) => {
-        $collector.emit($value).await
+        $collector.emit_with_control($value).await
     };
 }
 
@@ -253,18 +254,19 @@ mod tests {
     async fn test_flow_macro() {
         let numbers: Flow<i32> = flow! {
             for i in 1..=3 {
-                emit!(i);
+                let _ = emit!(i);
             }
         };
 
         let collected = Arc::new(Mutex::new(Vec::new()));
         let collected_clone = Arc::clone(&collected);
 
-        numbers
-            .collect(move |x| {
+        let _ = numbers
+            .collect_with_control(move |x| {
                 let collected = Arc::clone(&collected_clone);
                 async move {
                     collected.lock().await.push(x);
+                    std::ops::ControlFlow::Continue(())
                 }
             })
             .await;
@@ -287,25 +289,35 @@ mod tests {
 
     #[tokio::test]
     async fn test_sync_operators() {
+        use crate::{CoroutineScope, Dispatcher};
+
         let numbers: Flow<i32> = flow! {
             for i in 1..=10 {
-                emit!(i);
+                let _ = emit!(i);
             }
         };
 
         let collected = Arc::new(Mutex::new(Vec::new()));
         let collected_clone = Arc::clone(&collected);
 
-        numbers
-            .map_sync(|x| x * 2)
-            .filter_sync(|x| *x > 5)
-            .take(3)
-            .collect(move |x| {
-                let collected = Arc::clone(&collected_clone);
-                async move {
-                    collected.lock().await.push(x);
-                }
+        // Wrap in scope for structured concurrency
+        let scope = CoroutineScope::new(Dispatcher::default());
+        scope
+            .launch(async move {
+                let _ = numbers
+                    .map_sync(|x| x * 2)
+                    .filter_sync(|x| *x > 5)
+                    .take(3)
+                    .collect_with_control(move |x| {
+                        let collected = Arc::clone(&collected_clone);
+                        async move {
+                            collected.lock().await.push(x);
+                            std::ops::ControlFlow::Continue(())
+                        }
+                    })
+                    .await;
             })
+            .join()
             .await;
 
         let result = collected.lock().await;
@@ -314,6 +326,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_take_operator() {
+        use crate::{CoroutineScope, Dispatcher};
+
         let numbers: Flow<i32> = flow_fn(|collector| async move {
             for i in 1..=10 {
                 collector.emit(i).await;
@@ -323,14 +337,21 @@ mod tests {
         let collected = Arc::new(Mutex::new(Vec::new()));
         let collected_clone = Arc::clone(&collected);
 
-        numbers
-            .take(3)
-            .collect(move |x| {
-                let collected = Arc::clone(&collected_clone);
-                async move {
-                    collected.lock().await.push(x);
-                }
+        // Wrap in scope for structured concurrency
+        let scope = CoroutineScope::new(Dispatcher::default());
+        scope
+            .launch(async move {
+                numbers
+                    .take(3)
+                    .collect(move |x| {
+                        let collected = Arc::clone(&collected_clone);
+                        async move {
+                            collected.lock().await.push(x);
+                        }
+                    })
+                    .await;
             })
+            .join()
             .await;
 
         let result = collected.lock().await;

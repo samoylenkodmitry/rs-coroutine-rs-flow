@@ -1,8 +1,8 @@
-use coroflow::{flow, FlowCollector, FlowError, FlowTerminal};
+use coroflow::{flow_fn, FlowCollector, FlowError, FlowTerminal};
 
 #[tokio::test]
 async fn terminal_collectors_handle_counts_and_aggregation() {
-    let series = flow(|collector| async move {
+    let series = flow_fn(|collector| async move {
         for value in [1, 2, 3] {
             collector.emit(value).await;
         }
@@ -27,7 +27,7 @@ async fn terminal_collectors_handle_counts_and_aggregation() {
 
 #[tokio::test]
 async fn single_reports_errors_on_extra_elements() {
-    let with_two = flow(|collector| async move {
+    let with_two = flow_fn(|collector| async move {
         collector.emit(1).await;
         collector.emit(2).await;
     });
@@ -38,6 +38,6 @@ async fn single_reports_errors_on_extra_elements() {
         .expect_err("should fail with more than one element");
     assert_eq!(error, FlowError::MoreThanOneElement);
 
-    let empty_flow = flow(|_: FlowCollector<i32>| async move {});
+    let empty_flow = flow_fn(|_: FlowCollector<i32>| async move {});
     assert!(empty_flow.single().await.is_err());
 }

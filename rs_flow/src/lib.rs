@@ -5,13 +5,14 @@ pub mod builders;
 pub mod combining;
 pub mod flow;
 pub mod hot_flow;
+mod internal_utils;
 pub mod lifecycle;
 pub mod macros;
 pub mod operators;
 pub mod suspending_ext;
 pub mod terminal;
 
-pub use flow::{flow as flow_fn, flow, Flow, FlowCollector};
+pub use flow::{flow, flow_fn, Flow, FlowCollector, FlowStream};
 pub use hot_flow::{SharedFlow, StateFlow};
 pub use operators::FlowExt;
 pub use suspending_ext::SuspendingExt;
@@ -33,8 +34,9 @@ pub use combining::{merge, FlowCombining};
 
 // Re-export common items from rs_coroutine_core
 pub use rs_coroutine_core::{
-    get_current_scope, suspend_block, with_current_scope, CancelToken, CoroutineScope, Deferred,
-    Dispatcher, Dispatchers, Executor, JobHandle, Suspending, TokioExecutor, CURRENT_SCOPE,
+    check_cancellation, get_current_scope, suspend_block, with_current_scope, yield_now,
+    CancelToken, CancellationError, CoroutineScope, Deferred, Dispatcher, Dispatchers, Executor,
+    JobHandle, Suspending, TokioExecutor, CURRENT_SCOPE,
 };
 
 // Re-export scope module for macros
